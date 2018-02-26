@@ -13,6 +13,7 @@ pub trait Digital<'a> {
 }
 
 // TODO: Add implementation for the rest of the numeric, string types
+// TODO: add implementations of `nth` here to speed up use of `skip` in ART implementation
 
 pub struct U64BytesIterator {
     cursor: usize,

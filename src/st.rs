@@ -8,7 +8,7 @@ use std::mem;
 use std::ptr;
 
 use self::node_variants::*;
-use self::smallvec::SmallVec;
+use self::smallvec::{Array, SmallVec};
 use self::stdsimd::vendor;
 use self::stdsimd::simd;
 use super::Digital;
@@ -27,7 +27,6 @@ pub struct RawART<T: Element> {
     len: usize,
     root: ChildPtr<T>,
 }
-
 
 macro_rules! with_node_inner {
     ($base_node:expr, $nod:ident, $body:expr, $r:tt) => {
@@ -81,9 +80,10 @@ macro_rules! with_node {
     };
 }
 
-
-
 impl<T: Element> RawART<T> {
+    // TODO add support for skipping the `matches` check when no optimistic prefixes are
+    // encountered (this should happen e.g. for all integer keys)
+
     pub fn new() -> Self {
         RawART {
             len: 0,
@@ -115,23 +115,59 @@ impl<T: Element> RawART<T> {
                 }
                 Some(Err(inner_node)) => {
                     // handle prefixes now
-                    inner_node.prefix_matches_optimistic(digits).and_then(|consumed| {
-                        let new_digits = &digits[consumed..];
-                        if new_digits.len() == 0 {
-                            // Our digits were entirely consumed, but this is a non-leaf node.
-                            // That means our node is not present.
-                            return None;
-                        }
-                        with_node_mut!(inner_node, nod, {
-                            nod.find_raw(new_digits[0]).and_then(|next_node| {
-                                lookup_raw_recursive(unsafe { &mut *next_node }, k, &new_digits[1..])
+                    inner_node
+                        .prefix_matches_optimistic(digits)
+                        .and_then(|consumed| {
+                            let new_digits = &digits[consumed..];
+                            if new_digits.len() == 0 {
+                                // Our digits were entirely consumed, but this is a non-leaf node.
+                                // That means our node is not present.
+                                return None;
+                            }
+                            with_node_mut!(inner_node, nod, {
+                                nod.find_raw(new_digits[0]).and_then(|next_node| {
+                                    lookup_raw_recursive(
+                                        unsafe { &mut *next_node },
+                                        k,
+                                        &new_digits[1..],
+                                    )
+                                })
                             })
                         })
-                    })
                 }
             }
         }
         lookup_raw_recursive(&mut self.root, k, digits.as_slice())
+    }
+    pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<*mut T> {
+        let mut digits = SmallVec::<[u8; 32]>::new();
+        digits.extend(k.digits());
+        unsafe fn delete_raw_recursive<T: Element>(
+            k: &T::Key,
+            curr: &mut ChildPtr<T>,
+            parent: Option<(u8, &mut ChildPtr<T>)>,
+            digits: &[u8],
+        ) -> Option<*mut T> {
+            if curr.is_null() {
+                return None;
+            }
+            // TODO add delete method to Node, which should take in a digit and return either:
+            //     Failure
+            //     Success(unit)
+            //     Success(childptr)
+            // where the third case indicates that childptr is (was -- it must be moved out) the final child of the node,
+            // in which case need to install that child into the parent node. For now, don't
+            // attempt to increase the prefix.
+            unimplemented!()
+            // match curr.get_mut().unwrap() {
+            //     Ok(leaf_node) => {
+            //         if leaf_node.matches(k) {
+            //             unimplemented!()
+            //         }
+            //     }
+            // }
+        }
+        delete_raw_recursive(k, &mut self.root, None, &digits[..])
     }
 
     pub unsafe fn insert_raw(&mut self, elt: T) -> Result<(), T> {
@@ -172,7 +208,9 @@ impl<T: Element> RawART<T> {
                     // found an inner node. need to continue the search!
                     match inner_node.prefix_matches_pessimistic(&digits[consumed..]) {
                         Some(matched) => {
-                            // 
+                            // TODO review the base case here
+                            // This inner node shares a prefix with the current node. We recur into
+                            // this node.
                             consumed += matched;
                             // XXX what if consumed == digits.len()? the structure of the keys must
                             // guarantee that we do not see this. For example, if we store u64s,
@@ -183,8 +221,12 @@ impl<T: Element> RawART<T> {
                             // null-terminator is such a stop character.
                             debug_assert!(consumed < digits.len());
                             let d = digits[consumed];
-                            
+
                             with_node_mut!(inner_node, nod, {
+                                // TODO validate the prefix logic here:
+                                // if there's an optimistic prefix we may have to adjust its
+                                // length...  for now it may be safer to just truncate the prefix
+                                inner_node.count = cmp::min(inner_node.count, PREFIX_LEN as u32);
                                 if let Some(next_ptr) = nod.find_mut(d) {
                                     return insert_raw_recursive(next_ptr, e, digits, consumed);
                                 }
@@ -192,36 +234,79 @@ impl<T: Element> RawART<T> {
                                 RawNode::insert(&mut (nod as *mut _), d, c_ptr);
                                 return Ok(());
                             });
-                        },
+                        }
                         None => {
-                            // we need to split the current node and add a child.
+                            // Our inner node X shares a non-matching prefix with the current node
+                            fn adjust_prefix<R, T: Element>(
+                                n: &mut RawNode<R>,
+                                by: usize,
+                                leaf: Option<&T>,
+                                consumed: usize,
+                            ) {
+                                let old_count = n.count as usize;
+                                n.count -= by as u32;
+                                let start: *const _ = &n.prefix[by];
+                                // first we want to copy everything over
+                                unsafe {
+                                    ptr::copy(start, &mut n.prefix[0], PREFIX_LEN - by);
+                                }
+                                if old_count > PREFIX_LEN {
+                                    let leaf_ref = leaf.unwrap();
+                                    let needed = cmp::min(old_count - PREFIX_LEN, by);
+                                    let mut i = 0;
+                                    for (p, d) in n.prefix[PREFIX_LEN - by..]
+                                        .iter_mut()
+                                        .zip(leaf_ref.key().digits().skip(consumed))
+                                    {
+                                        *p = d;
+                                    }
+                                }
+                            }
                             //
-                            // This _should_ be easy. It is very similar to adding a Node4 over a
-                            // leaf, but with the complication that we may not have a full prefix
-                            let n4: Box<RawNode<Node4<T>>> = make_node_from_common_prefix(
-                                &inner_node.prefix[0..cmp::min(PREFIX_LEN,inner_node.count as usize)],
-                                &digits[consumed..],
+                            // There are X cases:
+                            // 1. The two nodes stop overlapping at a *known* index
+                            //    In this case, we make a new node with this known prefix,
+                            //    we insert the new leaf into this new node and we insert the old
+                            //    interior node into this new node as well, both at the digit where
+                            //    they diverge. Next we have to readjust the prefix
+                            //
+                            // currently we only cut off PREFIX_LEN levels. We could do more, but
+                            // that would involve getting
+                            let mut common_prefix_digits = SmallVec::<[u8; 32]>::new();
+                            let min_ref: Option<&T> = get_matching_prefix_node(
+                                digits,
+                                inner_node,
+                                consumed,
+                                &mut common_prefix_digits,
+                                PhantomData,
                             );
-                            let prefix_len = n4.count as usize;
-                            unimplemented!()
-                            // erase the prefix 
-                            // XXX this may break some invariants...
-                            // for i in 0..(PREFIX_LEN - prefix_len) {
-                            //     inner_node.prefix[i] = inner_node.prefix[prefix_len + i];
-                            //     inner_node.count -= 1;
-                            // }
-                            // let mut n4_raw = Box::into_raw(n4);
-                            // let mut leaf_ptr = ChildPtr::from_node(n4_raw);
-                            // let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
-                            // mem::swap(curr, &mut leaf_ptr);
-                            // RawNode::insert(
-                            //     &mut n4_raw,
-                            //     inner_node.prefix[0],
-                            //     leaf_ptr,
-                            //     );
-                            // RawNode::insert(&mut n4_raw, digits[consumed + prefix_len - 1], new_leaf);
-                            // return Ok(());
-                        },
+                            let n4: Box<RawNode<Node4<T>>> =
+                                make_node_with_prefix(&common_prefix_digits[..]);
+                            debug_assert_eq!(n4.count, common_prefix_digits.len());
+                            consumed += n4.count as usize;
+                            adjust_prefix(
+                                inner_node,
+                                inner_node.count as usize - common_prefix_digits.len(),
+                                min_ref,
+                                consumed,
+                            );
+                            let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
+                            let n4_raw = Box::into_raw(n4);
+                            // XXX: here we know that n4_raw will not get upgraded, that's the only
+                            // reason re-using it here is safe.
+                            RawNode::insert(&mut n4_raw, digits[consumed], c_ptr);
+
+                            // We want to insert curr into n4, that means we need to figure out
+                            // what its initial digit should be.
+                            //
+                            // We know that inner_node has some nonempty prefix (if it has an empty
+                            // prefix we would have matched it). What we want is the first
+                            // non-matching node in the prefix.
+                            debug_assert!(inner_node.count > 0);
+                            RawNode::insert(&mut n4_raw, inner_node.prefix[0], *curr);
+                            *curr = ChildPtr::from_node(n4_raw);
+                            return Ok(());
+                        }
                     }
                 }
             };
@@ -373,6 +458,7 @@ impl<T> RawNode<T> {
 trait Node<T>: Sized {
     // insert assumes that 'd' is not present here already
     unsafe fn insert(curr: &mut *mut Self, d: u8, ptr: ChildPtr<T>);
+    // TODO add a `delete` method
     fn get_min(&self) -> Option<&T>;
     fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>>;
     fn find(&self, d: u8) -> Option<&ChildPtr<T>> {
@@ -383,27 +469,96 @@ trait Node<T>: Sized {
     }
 }
 
-fn make_node_from_common_prefix<T>(d1: &[u8], d2: &[u8]) -> Box<RawNode<Node4<T>>> {
+fn get_matching_prefix_slice<'a, 'b, A, I1, I2>(d1: I1, d2: I2, v: &mut SmallVec<A>)
+where
+    A: Array<Item = u8>,
+    I1: Iterator<Item = &'a u8>,
+    I2: Iterator<Item = &'b u8>,
+{
+    for (d1, d2) in d1.zip(d2) {
+        if *d1 != *d2 {
+            return;
+        }
+        v.push(*d1)
+    }
+}
+
+fn get_matching_prefix_into<'a, 'b, A, I1, I2>(d1: I1, d2: I2, v: &mut SmallVec<A>)
+where
+    A: Array<Item = u8>,
+    I1: Iterator<Item = &'a u8>,
+    I2: Iterator<Item = u8>,
+{
+    for (d1, d2) in d1.zip(d2) {
+        if *d1 != d2 {
+            return;
+        }
+        v.push(*d1)
+    }
+}
+
+fn get_matching_prefix_node<'a, T: Element, A: Array<Item = u8>>(
+    d1: &[u8],
+    n: &'a RawNode<()>,
+    consumed: usize,
+    v: &mut SmallVec<A>,
+    _marker: PhantomData<T>,
+) -> Option<&'a T> {
+    // XXX: may want to specialize implementations of `skip` and return an iterator here watch this
+    debug_assert_eq!(v.len(), 0);
+    let node_explicit_prefix_len = cmp::min(PREFIX_LEN, n.count as usize);
+    get_matching_prefix_slice(
+        d1[consumed..].iter(),
+        n.prefix[..node_explicit_prefix_len].iter(),
+        v,
+    );
+    if v.len() < d1.len() && v.len() == PREFIX_LEN {
+        with_node!(
+            n,
+            node,
+            {
+                let min_elt = node.get_min().expect("prefix node is empty!");
+                let new_consumed = consumed + v.len();
+                get_matching_prefix_into(
+                    d1[new_consumed..].iter(),
+                    min_elt.key().digits().skip(consumed),
+                    v,
+                );
+                Some(min_elt)
+            },
+            T
+        )
+    } else {
+        None
+    }
+}
+
+fn make_node_with_prefix<T>(prefix: &[u8]) -> Box<RawNode<Node4<T>>> {
     let mut new_node = Box::new(RawNode {
         typ: NODE_4,
         children: 0,
-        count: 0,
+        count: prefix.len() as u32,
         prefix: [0; PREFIX_LEN],
         node: Node4 {
             keys: [0; 4],
             ptrs: unsafe { mem::transmute::<[usize; 4], [ChildPtr<T>; 4]>([0 as usize; 4]) },
         },
     });
-    for i in 0..cmp::min(d1.len(), d2.len()) {
-        if d1[i] != d2[i] {
-            break;
-        }
-        if i < 4 {
-            new_node.node.keys[i] = d1[i];
-        }
-        new_node.count += 1;
+    let new_len = cmp::min(prefix.len(), PREFIX_LEN);
+    unsafe {
+        ptr::copy_nonoverlapping(
+            &prefix[0] as *const _,
+            &mut new_node.prefix[0] as *mut _,
+            new_len,
+        );
     }
     new_node
+}
+
+fn make_node_from_common_prefix<T>(d1: &[u8], d2: &[u8]) -> Box<RawNode<Node4<T>>> {
+    let mut common_prefix_digits = SmallVec::<[u8; 32]>::new();
+    get_matching_prefix_slice(d1.iter(), d2.iter(), &mut common_prefix_digits);
+    make_node_with_prefix(&common_prefix_digits[..])
 }
 
 struct Node4<T> {
@@ -442,9 +597,7 @@ mod node_variants {
             let min_key_ix = 0; // we keep the child list sorted
             match unsafe { self.node.ptrs[min_key_ix as usize].get().unwrap() } {
                 Ok(t) => Some(t),
-                Err(inner_node) => {
-                    with_node!(inner_node, node, { node.get_min() })
-                },
+                Err(inner_node) => with_node!(inner_node, node, { node.get_min() }),
             }
         }
 
@@ -538,9 +691,7 @@ mod node_variants {
             let min_key_ix = 0; // we keep the child list sorted
             match unsafe { self.node.ptrs[min_key_ix as usize].get().unwrap() } {
                 Ok(t) => Some(t),
-                Err(inner_node) => {
-                    with_node!(inner_node, node, { node.get_min() })
-                },
+                Err(inner_node) => with_node!(inner_node, node, { node.get_min() }),
             }
         }
 
@@ -610,17 +761,18 @@ mod node_variants {
             }
         }
 
-        fn get_min(&self) -> Option<&T> { 
+        fn get_min(&self) -> Option<&T> {
             const KEYS_PER_WORD: usize = 8;
             const N_WORDS: usize = 256 / KEYS_PER_WORD;
             if self.children == 0 {
                 return None;
             }
-            let keys_words = unsafe { mem::transmute::<&[u8; 256], &[u64; N_WORDS]>(&self.node.keys) };
+            let keys_words =
+                unsafe { mem::transmute::<&[u8; 256], &[u64; N_WORDS]>(&self.node.keys) };
             for i in 0..N_WORDS {
                 let word = keys_words[i];
                 if word == 0 {
-                    continue
+                    continue;
                 }
                 let word_bytes = unsafe { mem::transmute::<u64, [u8; 8]>(word) };
                 for b in &word_bytes[..] {
@@ -628,9 +780,7 @@ mod node_variants {
                         let ix = *b - 1;
                         return match unsafe { self.node.ptrs[ix as usize].get().unwrap() } {
                             Ok(t) => Some(t),
-                            Err(inner_node) => {
-                                with_node!(inner_node, node, { node.get_min() })
-                            },
+                            Err(inner_node) => with_node!(inner_node, node, { node.get_min() }),
                         };
                     }
                 }
@@ -705,13 +855,11 @@ mod node_variants {
 
             for p in &self.node.ptrs[..] {
                 if p.is_null() {
-                    continue
+                    continue;
                 }
                 return match unsafe { p.get().unwrap() } {
                     Ok(t) => Some(t),
-                    Err(inner_node) => {
-                        with_node!(inner_node, node, { node.get_min() })
-                    },
+                    Err(inner_node) => with_node!(inner_node, node, { node.get_min() }),
                 };
             }
             unreachable!()
