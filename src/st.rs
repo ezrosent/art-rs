@@ -38,22 +38,22 @@ macro_rules! with_node_inner {
             match _b.typ {
                 NODE_4 => {
                     #[allow(unused_unsafe)]
-                    let $nod = unsafe { mem::transmute::<$r<()>, $r<Node4<$ty>>>(_b) };
+                    let $nod = unsafe { mem::transmute::<$r<_>, $r<Node4<$ty>>>(_b) };
                     $body
                 },
                 NODE_16 => {
                     #[allow(unused_unsafe)]
-                    let $nod = unsafe { mem::transmute::<$r<()>, $r<Node16<$ty>>>(_b) };
+                    let $nod = unsafe { mem::transmute::<$r<_>, $r<Node16<$ty>>>(_b) };
                     $body
                 },
                 NODE_48 => {
                     #[allow(unused_unsafe)]
-                    let $nod = unsafe { mem::transmute::<$r<()>, $r<Node48<$ty>>>(_b) };
+                    let $nod = unsafe { mem::transmute::<$r<_>, $r<Node48<$ty>>>(_b) };
                     $body
                 },
                 NODE_256 => {
                     #[allow(unused_unsafe)]
-                    let $nod = unsafe { mem::transmute::<$r<()>, $r<Node256<$ty>>>(_b) };
+                    let $nod = unsafe { mem::transmute::<$r<_>, $r<Node256<$ty>>>(_b) };
                     $body
                 },
                 _ => unreachable!(),
@@ -187,12 +187,30 @@ impl<T: Element> RawART<T> {
         ) -> Result<(), T> {
             debug_assert!(consumed <= digits.len());
             if curr.is_null() {
+                // Case 1: We found a null pointer, just replace it with a new leaf.
                 let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                 *curr = new_leaf;
                 return Ok(());
             }
-            let leaf_digits = match curr.get_mut().unwrap() {
+            // In order to get around the borrow checker, we need to move some inner variables out
+            // of the case analysis and continue them with access to `curr`.
+            //
+            // This seems less error-prone than transmuting everything to raw pointers.
+            enum Branch<T> {
+                B1(SmallVec<[u8; 32]>, T),
+                B2(*mut RawNode<Node4<T>>, u8),
+            };
+            let next_branch = match curr.get_mut().unwrap() {
                 Ok(leaf_node) => {
+                    // Case 2: We found a leaf node. We need to construct a new inner node with a the
+                    // prefix corresponding to the shared prefix of this leaf node and `e`, add
+                    // this leaf and `e` as a child to this new node, and replace the node as the
+                    // root.
+                    //
+                    // Of course, we have already borrowed curr mutably, so we cannot accomplish
+                    // these last few steps while we have still borrowed lead_node. We instead
+                    // return the leaf's digits so we can do the rest of the loop outside of the
+                    // match.
                     if leaf_node.matches(e.key()) {
                         // Found a matching leaf node. We swap in our value and return the old one.
                         leaf_node.replace_matching(&mut e);
@@ -202,130 +220,120 @@ impl<T: Element> RawART<T> {
                     let mut leaf_digits = SmallVec::<[u8; 32]>::new();
                     leaf_digits.extend(leaf_node.key().digits());
                     debug_assert!(leaf_digits.len() <= digits.len());
-                    leaf_digits
+                    Branch::B1(leaf_digits, e)
                 }
                 Err(inner_node) => {
-                    // found an inner node. need to continue the search!
-                    match inner_node.prefix_matches_pessimistic(&digits[consumed..]) {
-                        Some(matched) => {
-                            // TODO review the base case here
-                            // This inner node shares a prefix with the current node. We recur into
-                            // this node.
-                            consumed += matched;
-                            // XXX what if consumed == digits.len()? the structure of the keys must
-                            // guarantee that we do not see this. For example, if we store u64s,
-                            // then all keys are 8 bytes long so `consumed` cannot be more than 7.
-                            //
-                            // For variable-length keys, (like strings) we require a "stop"
-                            // character to appear to avoid this problem. For us, the
-                            // null-terminator is such a stop character.
-                            debug_assert!(consumed < digits.len());
-                            let d = digits[consumed];
+                    // found an interior node. need to continue the search!
+                    let (matched, min_ref) = inner_node.get_matching_prefix(&digits[consumed..], PhantomData as PhantomData<T>);
+                    if matched == digits[consumed..].len() {
+                        // Case 3: we found an inner node, with a matching prefix.
+                        //
+                        // In this case we recursively insert our node into this inner node, making
+                        // sure to update the 'consumed' variable appropriately.
+                        consumed += matched;
+                        // N.B what if consumed == digits.len()? the structure of the keys must
+                        // guarantee that we do not see this. For example, if we store u64s,
+                        // then all keys are 8 bytes long so `consumed` cannot be more than 7.
+                        //
+                        // For variable-length keys, (like strings) we require a "stop"
+                        // character to appear to avoid this problem. For us, the
+                        // null-terminator is such a stop character.
+                        debug_assert!(consumed < digits.len());
+                        let d = digits[consumed];
 
-                            with_node_mut!(inner_node, nod, {
-                                // TODO validate the prefix logic here:
-                                // if there's an optimistic prefix we may have to adjust its
-                                // length...  for now it may be safer to just truncate the prefix
-                                inner_node.count = cmp::min(inner_node.count, PREFIX_LEN as u32);
-                                if let Some(next_ptr) = nod.find_mut(d) {
-                                    return insert_raw_recursive(next_ptr, e, digits, consumed);
-                                }
-                                let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
-                                RawNode::insert(&mut (nod as *mut _), d, c_ptr);
-                                return Ok(());
-                            });
-                        }
-                        None => {
-                            // Our inner node X shares a non-matching prefix with the current node
-                            fn adjust_prefix<R, T: Element>(
-                                n: &mut RawNode<R>,
-                                by: usize,
-                                leaf: Option<&T>,
-                                consumed: usize,
-                            ) {
-                                let old_count = n.count as usize;
-                                n.count -= by as u32;
-                                let start: *const _ = &n.prefix[by];
-                                // first we want to copy everything over
-                                unsafe {
-                                    ptr::copy(start, &mut n.prefix[0], PREFIX_LEN - by);
-                                }
-                                if old_count > PREFIX_LEN {
-                                    let leaf_ref = leaf.unwrap();
-                                    let needed = cmp::min(old_count - PREFIX_LEN, by);
-                                    let mut i = 0;
-                                    for (p, d) in n.prefix[PREFIX_LEN - by..]
-                                        .iter_mut()
-                                        .zip(leaf_ref.key().digits().skip(consumed))
-                                    {
-                                        *p = d;
-                                    }
+                        with_node_mut!(inner_node, nod, {
+                            // TODO validate the prefix logic here:
+                            // if there's an optimistic prefix we may have to adjust its
+                            // length...  for now it may be safer to just truncate the prefix
+                            nod.count = cmp::min(nod.count, PREFIX_LEN as u32);
+                            if let Some(next_ptr) = nod.find_mut(d) {
+                                return insert_raw_recursive(next_ptr, e, digits, consumed + 1);
+                            }
+                            let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
+                            RawNode::insert(&mut (nod as *mut _), d, c_ptr);
+                            return Ok(());
+                        });
+                    } else {
+                        // Case 4: Our inner node shares a non-matching prefix with the current node.
+                        //
+                        // Here we have to figure out where the mismatch is and create a new parent
+                        // node for the inner node and our current node.
+                        unsafe fn adjust_prefix<R, T: Element>(
+                            n: &mut RawNode<R>,
+                            by: usize,
+                            leaf: Option<*const T>,
+                            consumed: usize,
+                        ) {
+                            let old_count = n.count as usize;
+                            n.count -= by as u32;
+                            let start: *const _ = &n.prefix[by];
+                            // first we want to copy everything over
+                            ptr::copy(start, &mut n.prefix[0], PREFIX_LEN - by);
+                            if old_count > PREFIX_LEN {
+                                let leaf_ref = &*leaf.unwrap();
+                                for (p, d) in n.prefix[PREFIX_LEN - by..]
+                                    .iter_mut()
+                                    .zip(leaf_ref.key().digits().skip(consumed))
+                                {
+                                    *p = d;
                                 }
                             }
-                            //
-                            // There are X cases:
-                            // 1. The two nodes stop overlapping at a *known* index
-                            //    In this case, we make a new node with this known prefix,
-                            //    we insert the new leaf into this new node and we insert the old
-                            //    interior node into this new node as well, both at the digit where
-                            //    they diverge. Next we have to readjust the prefix
-                            //
-                            // currently we only cut off PREFIX_LEN levels. We could do more, but
-                            // that would involve getting
-                            let mut common_prefix_digits = SmallVec::<[u8; 32]>::new();
-                            let min_ref: Option<&T> = get_matching_prefix_node(
-                                digits,
-                                inner_node,
-                                consumed,
-                                &mut common_prefix_digits,
-                                PhantomData,
-                            );
-                            let n4: Box<RawNode<Node4<T>>> =
-                                make_node_with_prefix(&common_prefix_digits[..]);
-                            debug_assert_eq!(n4.count, common_prefix_digits.len());
-                            consumed += n4.count as usize;
-                            adjust_prefix(
-                                inner_node,
-                                inner_node.count as usize - common_prefix_digits.len(),
-                                min_ref,
-                                consumed,
-                            );
-                            let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
-                            let n4_raw = Box::into_raw(n4);
-                            // XXX: here we know that n4_raw will not get upgraded, that's the only
-                            // reason re-using it here is safe.
-                            RawNode::insert(&mut n4_raw, digits[consumed], c_ptr);
-
-                            // We want to insert curr into n4, that means we need to figure out
-                            // what its initial digit should be.
-                            //
-                            // We know that inner_node has some nonempty prefix (if it has an empty
-                            // prefix we would have matched it). What we want is the first
-                            // non-matching node in the prefix.
-                            debug_assert!(inner_node.count > 0);
-                            RawNode::insert(&mut n4_raw, inner_node.prefix[0], *curr);
-                            *curr = ChildPtr::from_node(n4_raw);
-                            return Ok(());
                         }
+                        let common_prefix_digits = &digits[consumed..matched];
+                        let n4: Box<RawNode<Node4<T>>> = make_node_with_prefix(&common_prefix_digits[..]);
+                        debug_assert_eq!(n4.count as usize, common_prefix_digits.len());
+                        consumed += n4.count as usize;
+                        let by = inner_node.count as usize - common_prefix_digits.len();
+                        adjust_prefix(inner_node, by, min_ref, consumed);
+                        let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
+                        let mut n4_raw = Box::into_raw(n4);
+                        // XXX: here we know that n4_raw will not get upgraded, that's the only
+                        // reason re-using it here is safe.
+                        RawNode::insert(&mut n4_raw, digits[consumed], c_ptr);
+                        debug_assert!(inner_node.count > 0);
+
+                        // We want to insert curr into n4, that means we need to figure out
+                        // what its initial digit should be.
+                        //
+                        // We know that inner_node has some nonempty prefix (if it has an empty
+                        // prefix we would have matched it). What we want is the first
+                        // non-matching node in the prefix.
+                        //
+                        // Ideally we would do the rest of the operation! We cannot because of the
+                        // same borrowing issue present with Case 2. We continue the operation on
+                        // B2. Here's what we want to do:
+                        //   let mut n4_cptr = ChildPtr::from_node(n4_raw);
+                        //   mem::swap(curr, &mut n4_cptr);
+                        //   RawNode::insert(&mut n4_raw, inner_node.prefix[0], n4_cptr);
+                        //   return Ok(());
+                        Branch::B2(n4_raw, inner_node.prefix[0])
                     }
                 }
             };
-            let n4: Box<RawNode<Node4<T>>> = make_node_from_common_prefix(
-                &leaf_digits.as_slice()[consumed..],
-                &digits[consumed..],
-            );
-            let prefix_len = n4.count as usize;
-            let mut n4_raw = Box::into_raw(n4);
-            let mut leaf_ptr = ChildPtr::from_node(n4_raw);
-            let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
-            mem::swap(curr, &mut leaf_ptr);
-            RawNode::insert(
-                &mut n4_raw,
-                // XXX seems wrong
-                leaf_digits[consumed + prefix_len - 1],
-                leaf_ptr,
-            );
-            RawNode::insert(&mut n4_raw, digits[consumed + prefix_len - 1], new_leaf);
+            match next_branch {
+                Branch::B1(leaf_digits, e) => {
+                    let n4: Box<RawNode<Node4<T>>> = make_node_from_common_prefix(
+                        &leaf_digits.as_slice()[consumed..],
+                        &digits[consumed..],
+                    );
+                    let prefix_len = n4.count as usize;
+                    let mut n4_raw = Box::into_raw(n4);
+                    let mut leaf_ptr = ChildPtr::from_node(n4_raw);
+                    let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
+                    mem::swap(curr, &mut leaf_ptr);
+                    RawNode::insert(
+                        &mut n4_raw,
+                        leaf_digits[consumed + prefix_len - 1],
+                        leaf_ptr,
+                    );
+                    RawNode::insert(&mut n4_raw, digits[consumed + prefix_len - 1], new_leaf);
+                }
+                Branch::B2(mut n4_raw, d) => {
+                    let mut n4_cptr = ChildPtr::from_node(n4_raw);
+                    mem::swap(curr, &mut n4_cptr);
+                    RawNode::insert(&mut n4_raw, d, n4_cptr);
+                }
+            }
             Ok(())
         }
         insert_raw_recursive(&mut self.root, elt, digits.as_slice(), 0)
@@ -425,6 +433,31 @@ struct RawNode<Footer> {
     prefix: [u8; PREFIX_LEN],
     node: Footer,
 }
+impl RawNode<()> {
+    fn get_matching_prefix<T: Element>(&self, digits: &[u8], _marker: PhantomData<T>) -> (usize, Option<*const T>) {
+        let count = cmp::min(self.count as usize, PREFIX_LEN);
+        for i in 0..count {
+            if digits[i] != self.prefix[i] {
+                return (i, None);
+            }
+        }
+        if self.count as usize > PREFIX_LEN {
+            let mut matches = PREFIX_LEN;
+            with_node!(self, node, {
+                let min_node = node.get_min().expect("node with implicit prefix must be nonempty");
+                for (d, m) in digits[PREFIX_LEN..].iter().zip(min_node.key().digits().skip(PREFIX_LEN)) {
+                    if *d != m {
+                        break
+                    }
+                    matches += 1;
+                }
+                (matches, Some(min_node as *const T))
+            }, T)
+        } else {
+            (count, None)
+        }
+    }
+}
 
 impl<T> RawNode<T> {
     fn prefix_matches_optimistic(&self, digits: &[u8]) -> Option<usize> {
@@ -439,25 +472,18 @@ impl<T> RawNode<T> {
         }
         Some(count)
     }
+}
 
-    fn prefix_matches_pessimistic(&self, digits: &[u8]) -> Option<usize> {
-        let count = cmp::min(self.count as usize, PREFIX_LEN);
-        if digits.len() < count {
-            return None;
-        }
-        for i in 0..count {
-            if digits[i] != self.prefix[i] {
-                return None;
-            }
-        }
-
-        Some(count)
-    }
+enum DeleteResult<T> {
+    Failure,
+    Success,
+    Singleton(ChildPtr<T>),
 }
 
 trait Node<T>: Sized {
     // insert assumes that 'd' is not present here already
     unsafe fn insert(curr: &mut *mut Self, d: u8, ptr: ChildPtr<T>);
+    unsafe fn delete(&self, d: u8) -> DeleteResult<T>;
     // TODO add a `delete` method
     fn get_min(&self) -> Option<&T>;
     fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>>;
@@ -480,56 +506,6 @@ where
             return;
         }
         v.push(*d1)
-    }
-}
-
-fn get_matching_prefix_into<'a, 'b, A, I1, I2>(d1: I1, d2: I2, v: &mut SmallVec<A>)
-where
-    A: Array<Item = u8>,
-    I1: Iterator<Item = &'a u8>,
-    I2: Iterator<Item = u8>,
-{
-    for (d1, d2) in d1.zip(d2) {
-        if *d1 != d2 {
-            return;
-        }
-        v.push(*d1)
-    }
-}
-
-fn get_matching_prefix_node<'a, T: Element, A: Array<Item = u8>>(
-    d1: &[u8],
-    n: &'a RawNode<()>,
-    consumed: usize,
-    v: &mut SmallVec<A>,
-    _marker: PhantomData<T>,
-) -> Option<&'a T> {
-    // XXX: may want to specialize implementations of `skip` and return an iterator here watch this
-    debug_assert_eq!(v.len(), 0);
-    let node_explicit_prefix_len = cmp::min(PREFIX_LEN, n.count as usize);
-    get_matching_prefix_slice(
-        d1[consumed..].iter(),
-        n.prefix[..node_explicit_prefix_len].iter(),
-        v,
-    );
-    if v.len() < d1.len() && v.len() == PREFIX_LEN {
-        with_node!(
-            n,
-            node,
-            {
-                let min_elt = node.get_min().expect("prefix node is empty!");
-                let new_consumed = consumed + v.len();
-                get_matching_prefix_into(
-                    d1[new_consumed..].iter(),
-                    min_elt.key().digits().skip(consumed),
-                    v,
-                );
-                Some(min_elt)
-            },
-            T
-        )
-    } else {
-        None
     }
 }
 
@@ -588,6 +564,8 @@ mod node_variants {
             }
             unreachable!()
         }
+
+        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
 
         fn get_min(&self) -> Option<&T> {
             debug_assert!(self.children <= 4);
@@ -682,6 +660,8 @@ mod node_variants {
                 unimplemented!()
             }
         }
+
+        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
 
         fn get_min(&self) -> Option<&T> {
             debug_assert!(self.children <= 16);
@@ -788,6 +768,8 @@ mod node_variants {
             unreachable!()
         }
 
+        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
+
         unsafe fn insert(curr: &mut *mut RawNode<Node48<T>>, d: u8, ptr: ChildPtr<T>) {
             debug_assert_eq!((**curr).typ, NODE_48);
             let slf: &mut RawNode<Node48<T>> = &mut **curr;
@@ -865,10 +847,14 @@ mod node_variants {
             unreachable!()
         }
 
+        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
+
         unsafe fn insert(curr: &mut *mut RawNode<Node256<T>>, d: u8, ptr: ChildPtr<T>) {
             debug_assert_eq!((**curr).typ, NODE_256);
             let slf: &mut RawNode<Node256<T>> = &mut **curr;
             debug_assert!(slf.children <= 256);
+            debug_assert!(slf.node.ptrs[d as usize].is_null());
+            slf.children += 1;
             ptr::write(slf.node.ptrs.get_unchecked_mut(d as usize), ptr);
         }
     }
