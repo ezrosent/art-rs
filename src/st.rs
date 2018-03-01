@@ -139,7 +139,7 @@ impl<T: Element> RawART<T> {
         }
         lookup_raw_recursive(&mut self.root, k, digits.as_slice())
     }
-    pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<*mut T> {
+    pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
         unsafe fn delete_raw_recursive<T: Element>(
@@ -147,27 +147,80 @@ impl<T: Element> RawART<T> {
             curr: &mut ChildPtr<T>,
             parent: Option<(u8, &mut ChildPtr<T>)>,
             digits: &[u8],
-        ) -> Option<*mut T> {
+            // return the deleted node
+        ) -> Option<T> {
             if curr.is_null() {
                 return None;
             }
-            // TODO add delete method to Node, which should take in a digit and return either:
-            //     Failure
-            //     Success(unit)
-            //     Success(childptr)
-            // where the third case indicates that childptr is (was -- it must be moved out) the final child of the node,
-            // in which case need to install that child into the parent node. For now, don't
-            // attempt to increase the prefix.
-            unimplemented!()
-            // match curr.get_mut().unwrap() {
-            //     Ok(leaf_node) => {
-            //         if leaf_node.matches(k) {
-            //             unimplemented!()
-            //         }
-            //     }
-            // }
+            unsafe fn move_val_out<T>(mut cptr: ChildPtr<T>) -> T {
+                let res = {
+                    let r = cptr.get_mut().unwrap().unwrap();
+                    ptr::read(r)
+                };
+                mem::forget(cptr);
+                res
+            }
+
+            let rest_opts = match curr.get_mut().unwrap() {
+                Ok(leaf_node) => {
+                    if digits.len() == 0 || leaf_node.matches(k) {
+                        // we have a match! delete the leaf
+                        if let Some((d, parent_ref)) = parent {
+                            let (res, asgn) =  with_node_mut!(parent_ref.get_mut().unwrap().err().unwrap(), node, {
+                                match node.delete(d) {
+                                    DeleteResult::Success(deleted) => (Some(move_val_out(deleted)), None),
+                                    DeleteResult::Singleton{deleted, orphan} => (Some(move_val_out(deleted)), Some(orphan)),
+                                    DeleteResult::Failure => unreachable!(),
+                                }
+                            });
+                            if let Some(c_ptr) = asgn {
+                                *parent_ref = c_ptr;
+                            }
+                            return res;
+                        } else {
+                            // This is the root, we'll set it to null below.
+                            None
+                        }
+                    } else {
+                        return None;
+                    }
+                }
+                Err(inner_node) => {
+                    let (matched, _) = inner_node.get_matching_prefix(&digits[..], PhantomData as PhantomData<T>);
+                    if matched == inner_node.count as usize{
+                        // the prefix matched! we recur
+                        debug_assert!(digits.len() > matched);
+                        let next_digit = digits[matched];
+                        Some((inner_node as *mut RawNode<()>, matched))
+                        
+                    } else {
+                        // prefix was not a match, the key is not here
+                        return None;
+                    }
+                    // if the prefix matches, recur, otherwise just bail out
+                }
+            };
+            if let Some((inner_node, matched)) = rest_opts {
+                let next_digit = digits[matched];
+                with_node_mut!(&mut *inner_node, node, {
+                    node.find_mut(next_digit).and_then(|c_ptr| {
+                        // this wont compile
+                        return delete_raw_recursive(k, c_ptr, Some((next_digit, curr)), &digits[matched+1..]);
+                    })
+                })
+            } else {
+                // we are in the root, set curr to null.
+                let mut c_ptr = ChildPtr::null();
+                mem::swap(curr, &mut c_ptr);
+                Some(move_val_out(c_ptr))
+            }
         }
-        delete_raw_recursive(k, &mut self.root, None, &digits[..])
+        let res = delete_raw_recursive(k, &mut self.root, None, &digits[..]);
+        if res.is_some() {
+            debug_assert!(self.len > 0);
+            self.len -= 1;
+        }
+        res
     }
 
     pub unsafe fn insert_raw(&mut self, elt: T) -> Result<(), T> {
@@ -336,7 +389,11 @@ impl<T: Element> RawART<T> {
             }
             Ok(())
         }
-        insert_raw_recursive(&mut self.root, elt, digits.as_slice(), 0)
+        let res = insert_raw_recursive(&mut self.root, elt, digits.as_slice(), 0);
+        if res.is_ok() {
+            self.len += 1;
+        }
+        res
     }
 }
 
@@ -426,6 +483,7 @@ mod place_test {
 const PREFIX_LEN: usize = 8;
 
 #[repr(C)]
+#[derive(Debug)]
 struct RawNode<Footer> {
     typ: NodeType,
     children: u16,
@@ -476,14 +534,17 @@ impl<T> RawNode<T> {
 
 enum DeleteResult<T> {
     Failure,
-    Success,
-    Singleton(ChildPtr<T>),
+    Success(ChildPtr<T>),
+    Singleton{
+        deleted: ChildPtr<T>,
+        orphan: ChildPtr<T>,
+    },
 }
 
 trait Node<T>: Sized {
     // insert assumes that 'd' is not present here already
     unsafe fn insert(curr: &mut *mut Self, d: u8, ptr: ChildPtr<T>);
-    unsafe fn delete(&self, d: u8) -> DeleteResult<T>;
+    unsafe fn delete(&mut self, d: u8) -> DeleteResult<T>;
     // TODO add a `delete` method
     fn get_min(&self) -> Option<&T>;
     fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>>;
@@ -551,12 +612,12 @@ mod node_variants {
     pub const NODE_48: NodeType = NodeType(3);
     pub const NODE_256: NodeType = NodeType(4);
 
-    impl<T> Node<T> for RawNode<Node4<T>> {
-        fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
+    impl<T> RawNode<Node4<T>> {
+        fn find_internal(&self, d: u8) -> Option<(usize, *mut ChildPtr<T>)> {
             debug_assert!(self.children <= 4);
             for i in 0..4 {
                 if self.node.keys[i] == d {
-                    unsafe { return Some(self.node.ptrs.get_unchecked(i) as *const _ as *mut _) };
+                    unsafe { return Some((i, self.node.ptrs.get_unchecked(i) as *const _ as *mut _)) };
                 }
                 if i == self.children as usize {
                     return None;
@@ -564,8 +625,34 @@ mod node_variants {
             }
             unreachable!()
         }
+    }
 
-        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
+    impl<T> Node<T> for RawNode<Node4<T>> {
+        fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
+            self.find_internal(d).map(|(_, ptr)| ptr)
+        }
+
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { 
+            match self.find_internal(d) {
+                None => DeleteResult::Failure,
+                Some((ix, ptr)) => {
+                    let mut deleted = ChildPtr::null();
+                    mem::swap(&mut *ptr, &mut deleted);
+                    if ix != 3 {
+                        ptr::copy(&self.node.keys[ix+1], &mut self.node.keys[ix], 4-ix);
+                    }
+                    debug_assert!(self.children > 0);
+                    self.children -= 1;
+                    if self.children == 0 {
+                        let mut c_ptr = ChildPtr::null();
+                        mem::swap(&mut self.node.ptrs[self.node.keys[0] as usize], &mut c_ptr);
+                        DeleteResult::Singleton{deleted: deleted, orphan: c_ptr}
+                    } else {
+                        DeleteResult::Success(deleted)
+                    }
+                }
+            }
+        }
 
         fn get_min(&self) -> Option<&T> {
             debug_assert!(self.children <= 4);
@@ -661,7 +748,7 @@ mod node_variants {
             }
         }
 
-        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { unimplemented!() }
 
         fn get_min(&self) -> Option<&T> {
             debug_assert!(self.children <= 16);
@@ -768,7 +855,7 @@ mod node_variants {
             unreachable!()
         }
 
-        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { unimplemented!() }
 
         unsafe fn insert(curr: &mut *mut RawNode<Node48<T>>, d: u8, ptr: ChildPtr<T>) {
             debug_assert_eq!((**curr).typ, NODE_48);
@@ -847,7 +934,7 @@ mod node_variants {
             unreachable!()
         }
 
-        unsafe fn delete(&self, d: u8) -> DeleteResult<T> { unimplemented!() }
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { unimplemented!() }
 
         unsafe fn insert(curr: &mut *mut RawNode<Node256<T>>, d: u8, ptr: ChildPtr<T>) {
             debug_assert_eq!((**curr).typ, NODE_256);
