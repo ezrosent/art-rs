@@ -166,13 +166,21 @@ impl<T: Element> RawART<T> {
                     if digits.len() == 0 || leaf_node.matches(k) {
                         // we have a match! delete the leaf
                         if let Some((d, parent_ref)) = parent {
-                            let (res, asgn) =  with_node_mut!(parent_ref.get_mut().unwrap().err().unwrap(), node, {
-                                match node.delete(d) {
-                                    DeleteResult::Success(deleted) => (Some(move_val_out(deleted)), None),
-                                    DeleteResult::Singleton{deleted, orphan} => (Some(move_val_out(deleted)), Some(orphan)),
-                                    DeleteResult::Failure => unreachable!(),
+                            let (res, asgn) = with_node_mut!(
+                                parent_ref.get_mut().unwrap().err().unwrap(),
+                                node,
+                                {
+                                    match node.delete(d) {
+                                        DeleteResult::Success(deleted) => {
+                                            (Some(move_val_out(deleted)), None)
+                                        }
+                                        DeleteResult::Singleton { deleted, orphan } => {
+                                            (Some(move_val_out(deleted)), Some(orphan))
+                                        }
+                                        DeleteResult::Failure => unreachable!(),
+                                    }
                                 }
-                            });
+                            );
                             if let Some(c_ptr) = asgn {
                                 *parent_ref = c_ptr;
                             }
@@ -186,13 +194,12 @@ impl<T: Element> RawART<T> {
                     }
                 }
                 Err(inner_node) => {
-                    let (matched, _) = inner_node.get_matching_prefix(&digits[..], PhantomData as PhantomData<T>);
-                    if matched == inner_node.count as usize{
+                    let (matched, _) =
+                        inner_node.get_matching_prefix(&digits[..], PhantomData as PhantomData<T>);
+                    if matched == inner_node.count as usize {
                         // the prefix matched! we recur
                         debug_assert!(digits.len() > matched);
-                        let next_digit = digits[matched];
                         Some((inner_node as *mut RawNode<()>, matched))
-                        
                     } else {
                         // prefix was not a match, the key is not here
                         return None;
@@ -205,13 +212,17 @@ impl<T: Element> RawART<T> {
                 with_node_mut!(&mut *inner_node, node, {
                     node.find_mut(next_digit).and_then(|c_ptr| {
                         // this wont compile
-                        return delete_raw_recursive(k, c_ptr, Some((next_digit, curr)), &digits[matched+1..]);
+                        return delete_raw_recursive(
+                            k,
+                            c_ptr,
+                            Some((next_digit, curr)),
+                            &digits[matched + 1..],
+                        );
                     })
                 })
             } else {
                 // we are in the root, set curr to null.
-                let mut c_ptr = ChildPtr::null();
-                mem::swap(curr, &mut c_ptr);
+                let c_ptr = curr.swap_null();
                 Some(move_val_out(c_ptr))
             }
         }
@@ -277,7 +288,8 @@ impl<T: Element> RawART<T> {
                 }
                 Err(inner_node) => {
                     // found an interior node. need to continue the search!
-                    let (matched, min_ref) = inner_node.get_matching_prefix(&digits[consumed..], PhantomData as PhantomData<T>);
+                    let (matched, min_ref) = inner_node
+                        .get_matching_prefix(&digits[consumed..], PhantomData as PhantomData<T>);
                     if matched == digits[consumed..].len() {
                         // Case 3: we found an inner node, with a matching prefix.
                         //
@@ -333,7 +345,8 @@ impl<T: Element> RawART<T> {
                             }
                         }
                         let common_prefix_digits = &digits[consumed..matched];
-                        let n4: Box<RawNode<Node4<T>>> = make_node_with_prefix(&common_prefix_digits[..]);
+                        let n4: Box<RawNode<Node4<T>>> =
+                            make_node_with_prefix(&common_prefix_digits[..]);
                         debug_assert_eq!(n4.count as usize, common_prefix_digits.len());
                         consumed += n4.count as usize;
                         let by = inner_node.count as usize - common_prefix_digits.len();
@@ -433,6 +446,12 @@ impl<T> ChildPtr<T> {
         ChildPtr((p as usize) & 1, PhantomData)
     }
 
+    fn swap_null(&mut self) -> Self {
+        let mut self_ptr = ChildPtr::null();
+        mem::swap(self, &mut self_ptr);
+        self_ptr
+    }
+
     fn is_null(&self) -> bool {
         self.0 == 0
     }
@@ -492,7 +511,11 @@ struct RawNode<Footer> {
     node: Footer,
 }
 impl RawNode<()> {
-    fn get_matching_prefix<T: Element>(&self, digits: &[u8], _marker: PhantomData<T>) -> (usize, Option<*const T>) {
+    fn get_matching_prefix<T: Element>(
+        &self,
+        digits: &[u8],
+        _marker: PhantomData<T>,
+    ) -> (usize, Option<*const T>) {
         let count = cmp::min(self.count as usize, PREFIX_LEN);
         for i in 0..count {
             if digits[i] != self.prefix[i] {
@@ -501,16 +524,25 @@ impl RawNode<()> {
         }
         if self.count as usize > PREFIX_LEN {
             let mut matches = PREFIX_LEN;
-            with_node!(self, node, {
-                let min_node = node.get_min().expect("node with implicit prefix must be nonempty");
-                for (d, m) in digits[PREFIX_LEN..].iter().zip(min_node.key().digits().skip(PREFIX_LEN)) {
-                    if *d != m {
-                        break
+            with_node!(
+                self,
+                node,
+                {
+                    let min_node = node.get_min()
+                        .expect("node with implicit prefix must be nonempty");
+                    for (d, m) in digits[PREFIX_LEN..]
+                        .iter()
+                        .zip(min_node.key().digits().skip(PREFIX_LEN))
+                    {
+                        if *d != m {
+                            break;
+                        }
+                        matches += 1;
                     }
-                    matches += 1;
-                }
-                (matches, Some(min_node as *const T))
-            }, T)
+                    (matches, Some(min_node as *const T))
+                },
+                T
+            )
         } else {
             (count, None)
         }
@@ -535,7 +567,7 @@ impl<T> RawNode<T> {
 enum DeleteResult<T> {
     Failure,
     Success(ChildPtr<T>),
-    Singleton{
+    Singleton {
         deleted: ChildPtr<T>,
         orphan: ChildPtr<T>,
     },
@@ -617,7 +649,9 @@ mod node_variants {
             debug_assert!(self.children <= 4);
             for i in 0..4 {
                 if self.node.keys[i] == d {
-                    unsafe { return Some((i, self.node.ptrs.get_unchecked(i) as *const _ as *mut _)) };
+                    unsafe {
+                        return Some((i, self.node.ptrs.get_unchecked(i) as *const _ as *mut _));
+                    };
                 }
                 if i == self.children as usize {
                     return None;
@@ -632,21 +666,24 @@ mod node_variants {
             self.find_internal(d).map(|(_, ptr)| ptr)
         }
 
-        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { 
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> {
             match self.find_internal(d) {
                 None => DeleteResult::Failure,
                 Some((ix, ptr)) => {
                     let mut deleted = ChildPtr::null();
                     mem::swap(&mut *ptr, &mut deleted);
                     if ix != 3 {
-                        ptr::copy(&self.node.keys[ix+1], &mut self.node.keys[ix], 4-ix);
+                        ptr::copy(&self.node.keys[ix + 1], &mut self.node.keys[ix], 4 - ix);
                     }
                     debug_assert!(self.children > 0);
                     self.children -= 1;
-                    if self.children == 0 {
+                    if self.children == 1 {
                         let mut c_ptr = ChildPtr::null();
                         mem::swap(&mut self.node.ptrs[self.node.keys[0] as usize], &mut c_ptr);
-                        DeleteResult::Singleton{deleted: deleted, orphan: c_ptr}
+                        DeleteResult::Singleton {
+                            deleted: deleted,
+                            orphan: c_ptr,
+                        }
                     } else {
                         DeleteResult::Success(deleted)
                     }
@@ -720,8 +757,8 @@ mod node_variants {
         ptrs: [ChildPtr<T>; 16],
     }
 
-    impl<T> Node<T> for RawNode<Node16<T>> {
-        fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
+    impl<T> RawNode<Node16<T>> {
+        fn find_internal(&self, d: u8) -> Option<(usize, *mut ChildPtr<T>)> {
             let mask = (1 << (self.children as usize)) - 1;
             #[cfg(all(any(target_arch = "x86_64", target_arch = "x86"), target_feature = "sse2"))]
             {
@@ -733,11 +770,11 @@ mod node_variants {
                     None
                 } else {
                     debug_assert_eq!(bits.count_ones(), 1);
-                    let target = bits.trailing_zeros();
+                    let target = bits.trailing_zeros() as usize;
                     debug_assert!(target < 16);
-                    Some(unsafe {
-                        self.node.ptrs.get_unchecked(target as usize) as *const _ as *mut _
-                    })
+                    Some((target, unsafe {
+                        self.node.ptrs.get_unchecked(target) as *const _ as *mut _
+                    }))
                 };
             }
             #[cfg(not(all(any(target_arch = "x86_64", target_arch = "x86"),
@@ -747,8 +784,35 @@ mod node_variants {
                 unimplemented!()
             }
         }
+    }
 
-        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { unimplemented!() }
+    impl<T> Node<T> for RawNode<Node16<T>> {
+        fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
+            self.find_internal(d).map(|(_, ptr)| ptr)
+        }
+
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> {
+            match self.find_internal(d) {
+                None => DeleteResult::Failure,
+                Some((ix, ptr)) => {
+                    let mut deleted = ChildPtr::null();
+                    mem::swap(&mut *ptr, &mut deleted);
+                    if ix != 15 {
+                        ptr::copy(&self.node.keys[ix + 1], &mut self.node.keys[ix], 16 - ix);
+                    }
+                    debug_assert!(self.children > 0);
+                    self.children -= 1;
+                    if self.children == 1 {
+                        DeleteResult::Singleton {
+                            deleted: deleted,
+                            orphan: self.node.ptrs[self.node.keys[0] as usize].swap_null(),
+                        }
+                    } else {
+                        DeleteResult::Success(deleted)
+                    }
+                }
+            }
+        }
 
         fn get_min(&self) -> Option<&T> {
             debug_assert!(self.children <= 16);
@@ -816,6 +880,32 @@ mod node_variants {
         ptrs: [ChildPtr<T>; 48],
     }
 
+    impl<T> RawNode<Node48<T>> {
+        unsafe fn get_min_inner(&self) -> Option<(usize, *mut ChildPtr<T>)> {
+            const KEYS_PER_WORD: usize = 8;
+            const N_WORDS: usize = 256 / KEYS_PER_WORD;
+            if self.children == 0 {
+                return None;
+            }
+            let keys_words = mem::transmute::<&[u8; 256], &[u64; N_WORDS]>(&self.node.keys);
+            for i in 0..N_WORDS {
+                let word = keys_words[i];
+                if word == 0 {
+                    continue;
+                }
+                let word_bytes = mem::transmute::<u64, [u8; 8]>(word);
+                for ii in 0..8 {
+                    let b = word_bytes[ii];
+                    if b != 0 {
+                        let ix = b - 1;
+                        return Some((i * KEYS_PER_WORD + ii, &self.node.ptrs[ix as usize] as *const _ as *mut _));
+                    }
+                }
+            }
+            unreachable!()
+        }
+    }
+
     impl<T> Node<T> for RawNode<Node48<T>> {
         fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
             let ix = unsafe { *self.node.keys.get_unchecked(d as usize) as usize };
@@ -829,33 +919,37 @@ mod node_variants {
         }
 
         fn get_min(&self) -> Option<&T> {
-            const KEYS_PER_WORD: usize = 8;
-            const N_WORDS: usize = 256 / KEYS_PER_WORD;
-            if self.children == 0 {
-                return None;
+            unsafe {
+                self.get_min_inner()
+                    .and_then(|(_, t)| match (*t).get().unwrap() {
+                        Ok(t) => Some(t),
+                        Err(inner_node) => with_node!(inner_node, node, { node.get_min() }),
+                    })
             }
-            let keys_words =
-                unsafe { mem::transmute::<&[u8; 256], &[u64; N_WORDS]>(&self.node.keys) };
-            for i in 0..N_WORDS {
-                let word = keys_words[i];
-                if word == 0 {
-                    continue;
-                }
-                let word_bytes = unsafe { mem::transmute::<u64, [u8; 8]>(word) };
-                for b in &word_bytes[..] {
-                    if *b != 0 {
-                        let ix = *b - 1;
-                        return match unsafe { self.node.ptrs[ix as usize].get().unwrap() } {
-                            Ok(t) => Some(t),
-                            Err(inner_node) => with_node!(inner_node, node, { node.get_min() }),
-                        };
+        }
+
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> {
+            match self.find_raw(d) {
+                None => DeleteResult::Failure,
+                Some(p) => {
+                    // Found a pointer, swap out a null ChildPtr and set keys index to 0.
+                    let deleted = (*p).swap_null();
+                    self.node.keys[d as usize] = 0;
+                    debug_assert!(self.children > 0);
+                    self.children -= 1;
+                    if self.children == 1 {
+                        // TODO remove the first entry, it isn't required 
+                        let (_, or_ptr) = self.get_min_inner().expect("Should be one more child");
+                        DeleteResult::Singleton {
+                            deleted: deleted,
+                            orphan: (*or_ptr).swap_null(),
+                        }
+                    } else {
+                        DeleteResult::Success(deleted)
                     }
                 }
             }
-            unreachable!()
         }
-
-        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { unimplemented!() }
 
         unsafe fn insert(curr: &mut *mut RawNode<Node48<T>>, d: u8, ptr: ChildPtr<T>) {
             debug_assert_eq!((**curr).typ, NODE_48);
@@ -934,7 +1028,26 @@ mod node_variants {
             unreachable!()
         }
 
-        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> { unimplemented!() }
+        unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> {
+            if self.children == 0 || self.node.ptrs[d as usize].is_null() {
+                return DeleteResult::Failure;
+            }
+            let deleted = self.node.ptrs[d as usize].swap_null();
+            self.children -= 1;
+            if self.children == 1 {
+                for i in 0..256 {
+                    let node = &mut self.node.ptrs[i];
+                    if node.is_null() {
+                        continue;
+                    }
+                    return DeleteResult::Singleton{
+                        deleted: deleted,
+                        orphan: node.swap_null(),
+                    };
+                }
+            }
+            DeleteResult::Success(deleted)
+        }
 
         unsafe fn insert(curr: &mut *mut RawNode<Node256<T>>, d: u8, ptr: ChildPtr<T>) {
             debug_assert_eq!((**curr).typ, NODE_256);
