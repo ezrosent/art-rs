@@ -20,6 +20,30 @@ pub trait Element {
     fn replace_matching(&mut self, other: &mut Self);
 }
 
+pub struct ArtElement<T: for<'a> Digital<'a> + PartialEq>(T);
+
+impl<T: for<'a> Digital<'a> + PartialEq> ArtElement<T> {
+    pub fn new(t: T) -> ArtElement<T> {
+        ArtElement(t)
+    }
+}
+
+impl<T: for<'a> Digital<'a> + PartialEq> Element for ArtElement<T> {
+    type Key = T;
+    fn key(&self) -> &T {
+        &self.0
+    }
+
+    fn matches(&self, k: &Self::Key) -> bool {
+        *k == self.0
+    }
+
+    fn replace_matching(&mut self, other: &mut ArtElement<T>) {
+        debug_assert!(self.matches(other.key()));
+    }
+}
+
+
 type RawMutRef<'a, T> = &'a mut RawNode<T>;
 type RawRef<'a, T> = &'a RawNode<T>;
 
@@ -92,11 +116,11 @@ impl<T: Element> RawART<T> {
     }
 
     // replace with NonNull
-    pub fn lookup_raw(&mut self, k: &T::Key) -> Option<*mut T> {
+    pub unsafe fn lookup_raw(&self, k: &T::Key) -> Option<*mut T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
-        fn lookup_raw_recursive<T: Element>(
-            curr: &mut ChildPtr<T>,
+        unsafe fn lookup_raw_recursive<T: Element>(
+            curr: &ChildPtr<T>,
             k: &T::Key,
             digits: &[u8],
         ) -> Option<*mut T> {
@@ -104,10 +128,10 @@ impl<T: Element> RawART<T> {
             // In lieu of that, it's worth profiling this code to determine if an ugly iterative
             // rewrite would be worthwhile.
             // TODO: take consumed prefix into account?
-            match unsafe { curr.get_mut() } {
+            match curr.get_raw() {
                 None => None,
                 Some(Ok(leaf_node)) => {
-                    if leaf_node.matches(k) {
+                    if (*leaf_node).matches(k) {
                         Some(leaf_node)
                     } else {
                         None
@@ -115,7 +139,7 @@ impl<T: Element> RawART<T> {
                 }
                 Some(Err(inner_node)) => {
                     // handle prefixes now
-                    inner_node
+                    (*inner_node)
                         .prefix_matches_optimistic(digits)
                         .and_then(|consumed| {
                             let new_digits = &digits[consumed..];
@@ -124,20 +148,20 @@ impl<T: Element> RawART<T> {
                                 // That means our node is not present.
                                 return None;
                             }
-                            with_node_mut!(inner_node, nod, {
-                                nod.find_raw(new_digits[0]).and_then(|next_node| {
-                                    lookup_raw_recursive(
-                                        unsafe { &mut *next_node },
-                                        k,
-                                        &new_digits[1..],
-                                    )
+                                with_node!(&*inner_node, nod, {
+                                    nod.find_raw(new_digits[0]).and_then(|next_node| {
+                                        lookup_raw_recursive(
+                                            &*next_node,
+                                            k,
+                                            &new_digits[1..],
+                                            )
+                                    })
                                 })
-                            })
                         })
                 }
             }
         }
-        lookup_raw_recursive(&mut self.root, k, digits.as_slice())
+        lookup_raw_recursive(&self.root, k, digits.as_slice())
     }
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
@@ -463,6 +487,16 @@ impl<T> ChildPtr<T> {
             Some(Ok(&*((self.0 & !1) as *const T)))
         } else {
             Some(Err(&*(self.0 as *const RawNode<()>)))
+        }
+    }
+
+    unsafe fn get_raw(&self) -> Option<Result<*mut T, *mut RawNode<()>>> {
+        if self.0 == 0 {
+            None
+        } else if self.0 & 1 == 1 {
+            Some(Ok((self.0 & !1) as *mut T))
+        } else {
+            Some(Err(self.0 as *mut RawNode<()>))
         }
     }
 
