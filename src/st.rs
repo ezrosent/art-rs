@@ -2,6 +2,7 @@
 extern crate smallvec;
 extern crate stdsimd;
 
+use std::borrow::Borrow;
 use std::cmp;
 use std::marker::PhantomData;
 use std::mem;
@@ -14,6 +15,7 @@ use self::stdsimd::simd;
 use super::Digital;
 
 pub trait Element {
+    // TODO: use Borrow instead
     type Key: for<'a> Digital<'a>;
     fn key(&self) -> &Self::Key;
     fn matches(&self, k: &Self::Key) -> bool;
@@ -40,9 +42,9 @@ impl<T: for<'a> Digital<'a> + PartialEq> Element for ArtElement<T> {
 
     fn replace_matching(&mut self, other: &mut ArtElement<T>) {
         debug_assert!(self.matches(other.key()));
+        mem::swap(self, other);
     }
 }
-
 
 type RawMutRef<'a, T> = &'a mut RawNode<T>;
 type RawRef<'a, T> = &'a RawNode<T>;
@@ -50,6 +52,52 @@ type RawRef<'a, T> = &'a RawNode<T>;
 pub struct RawART<T: Element> {
     len: usize,
     root: ChildPtr<T>,
+}
+
+pub type ARTSet<T> = RawART<ArtElement<T>>;
+
+impl<T: for<'a> Digital<'a> + PartialEq> ARTSet<T> {
+    pub fn contains<Q>(&self, key: &Q) -> bool
+    where
+        Q: Borrow<T> + ?Sized,
+    {
+        unsafe { self.lookup_raw(key.borrow()).is_some() }
+    }
+
+    pub fn contains_val(&self, key: T) -> bool
+    {
+        self.contains(&key)
+    }
+
+    pub fn add(&mut self, k: T) -> bool {
+        self.replace(k).is_some()
+    }
+
+    pub fn replace(&mut self, k: T) -> Option<T> {
+        match unsafe { self.insert_raw(ArtElement::new(k)) } {
+            Ok(()) => None,
+            Err(ArtElement(t)) => Some(t),
+        }
+    }
+
+    pub fn take<Q>(&mut self, key: &Q) -> Option<T>
+    where
+        Q: Borrow<T> + ?Sized,
+    {
+        unsafe { self.delete_raw(key.borrow()) }.map(|x| x.0)
+    }
+
+    pub fn remove_val(&mut self, key: T) -> bool
+    {
+        self.remove(&key)
+    }
+
+    pub fn remove<Q>(&mut self, key: &Q) -> bool
+    where
+        Q: Borrow<T> + ?Sized,
+    {
+        self.take(key).is_some()
+    }
 }
 
 macro_rules! with_node_inner {
@@ -115,6 +163,10 @@ impl<T: Element> RawART<T> {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
     // replace with NonNull
     pub unsafe fn lookup_raw(&self, k: &T::Key) -> Option<*mut T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
@@ -129,7 +181,7 @@ impl<T: Element> RawART<T> {
             // rewrite would be worthwhile.
             // TODO: take consumed prefix into account?
             match curr.get_raw() {
-                None => None,
+                None => {  None },
                 Some(Ok(leaf_node)) => {
                     if (*leaf_node).matches(k) {
                         Some(leaf_node)
@@ -148,15 +200,11 @@ impl<T: Element> RawART<T> {
                                 // That means our node is not present.
                                 return None;
                             }
-                                with_node!(&*inner_node, nod, {
-                                    nod.find_raw(new_digits[0]).and_then(|next_node| {
-                                        lookup_raw_recursive(
-                                            &*next_node,
-                                            k,
-                                            &new_digits[1..],
-                                            )
-                                    })
+                            with_node!(&*inner_node, nod, {
+                                nod.find_raw(new_digits[0]).and_then(|next_node| {
+                                    lookup_raw_recursive(&*next_node, k, &new_digits[1..])
                                 })
+                            })
                         })
                 }
             }
@@ -261,6 +309,7 @@ impl<T: Element> RawART<T> {
     pub unsafe fn insert_raw(&mut self, elt: T) -> Result<(), T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(elt.key().digits());
+        eprintln!("ir: elt={:?}", &digits[..]);
         // want to do something similar to lookup_raw_recursive.
         // Need to keep track of:
         // - current node
@@ -455,6 +504,12 @@ impl<T> Drop for ChildPtr<T> {
     }
 }
 
+impl<T> ::std::fmt::Debug for ChildPtr<T> {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
+        write!(f, "ChildPtr({:?})", self.0)
+    }
+}
+
 impl<T> ChildPtr<T> {
     fn null() -> Self {
         ChildPtr(0, PhantomData)
@@ -467,7 +522,7 @@ impl<T> ChildPtr<T> {
 
     fn from_leaf(p: *mut T) -> Self {
         debug_assert!(!p.is_null());
-        ChildPtr((p as usize) & 1, PhantomData)
+        ChildPtr((p as usize) | 1, PhantomData)
     }
 
     fn swap_null(&mut self) -> Self {
@@ -770,6 +825,7 @@ mod node_variants {
                     return;
                 }
                 let cur_digit = slf.node.keys[i];
+                eprintln!("n4insert: i={:?} d={:?}, cur={:?}", i, d, cur_digit);
                 debug_assert!(cur_digit != d);
                 if cur_digit > d {
                     // we keep the list sorted, so we need to move all other entries ahead by 1
@@ -932,7 +988,10 @@ mod node_variants {
                     let b = word_bytes[ii];
                     if b != 0 {
                         let ix = b - 1;
-                        return Some((i * KEYS_PER_WORD + ii, &self.node.ptrs[ix as usize] as *const _ as *mut _));
+                        return Some((
+                            i * KEYS_PER_WORD + ii,
+                            &self.node.ptrs[ix as usize] as *const _ as *mut _,
+                        ));
                     }
                 }
             }
@@ -972,7 +1031,7 @@ mod node_variants {
                     debug_assert!(self.children > 0);
                     self.children -= 1;
                     if self.children == 1 {
-                        // TODO remove the first entry, it isn't required 
+                        // TODO remove the first entry, it isn't required
                         let (_, or_ptr) = self.get_min_inner().expect("Should be one more child");
                         DeleteResult::Singleton {
                             deleted: deleted,
@@ -1074,7 +1133,7 @@ mod node_variants {
                     if node.is_null() {
                         continue;
                     }
-                    return DeleteResult::Singleton{
+                    return DeleteResult::Singleton {
                         deleted: deleted,
                         orphan: node.swap_null(),
                     };
@@ -1092,4 +1151,35 @@ mod node_variants {
             ptr::write(slf.node.ptrs.get_unchecked_mut(d as usize), ptr);
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn basic_set_behavior() {
+        let mut s = ARTSet::<u64>::new();
+        // Empty set has length 0
+        assert_eq!(s.len(), 0);
+
+        // Add 0
+        assert!(!s.add(0));
+        assert_eq!(s.len(), 1);
+        assert!(s.contains_val(0));
+
+        // Remove 0
+        assert!(s.remove_val(0));
+        assert_eq!(s.len(), 0);
+        assert!(!s.contains_val(0));
+
+        // Add 1 then 0
+        assert!(!s.add(1010));
+        assert_eq!(s.len(), 1);
+        assert!(!s.add(2020));
+        assert_eq!(s.len(), 2);
+        assert!(s.contains_val(1010));
+        assert!(s.contains_val(2020));
+    }
+
 }
