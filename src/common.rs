@@ -3,7 +3,7 @@ extern crate byteorder;
 use std::iter::Iterator;
 use std::str;
 use self::byteorder::{BigEndian, ByteOrder};
- 
+
 /// `Digital` describes types that can be expressed as sequences of bytes.
 ///
 /// The type's `digits` should respect equality and ordering on the type.

@@ -64,8 +64,7 @@ impl<T: for<'a> Digital<'a> + PartialEq> ARTSet<T> {
         unsafe { self.lookup_raw(key.borrow()).is_some() }
     }
 
-    pub fn contains_val(&self, key: T) -> bool
-    {
+    pub fn contains_val(&self, key: T) -> bool {
         self.contains(&key)
     }
 
@@ -87,8 +86,7 @@ impl<T: for<'a> Digital<'a> + PartialEq> ARTSet<T> {
         unsafe { self.delete_raw(key.borrow()) }.map(|x| x.0)
     }
 
-    pub fn remove_val(&mut self, key: T) -> bool
-    {
+    pub fn remove_val(&mut self, key: T) -> bool {
         self.remove(&key)
     }
 
@@ -181,7 +179,7 @@ impl<T: Element> RawART<T> {
             // rewrite would be worthwhile.
             // TODO: take consumed prefix into account?
             match curr.get_raw() {
-                None => {  None },
+                None => None,
                 Some(Ok(leaf_node)) => {
                     if (*leaf_node).matches(k) {
                         Some(leaf_node)
@@ -309,7 +307,6 @@ impl<T: Element> RawART<T> {
     pub unsafe fn insert_raw(&mut self, elt: T) -> Result<(), T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(elt.key().digits());
-        eprintln!("ir: elt={:?}", &digits[..]);
         // want to do something similar to lookup_raw_recursive.
         // Need to keep track of:
         // - current node
@@ -337,6 +334,7 @@ impl<T: Element> RawART<T> {
                 B1(SmallVec<[u8; 32]>, T),
                 B2(*mut RawNode<Node4<T>>, u8),
             };
+            let curr_unsafe: &mut ChildPtr<T> = &mut *(curr as *mut _);
             let next_branch = match curr.get_mut().unwrap() {
                 Ok(leaf_node) => {
                     // Case 2: We found a leaf node. We need to construct a new inner node with a the
@@ -363,7 +361,7 @@ impl<T: Element> RawART<T> {
                     // found an interior node. need to continue the search!
                     let (matched, min_ref) = inner_node
                         .get_matching_prefix(&digits[consumed..], PhantomData as PhantomData<T>);
-                    if matched == digits[consumed..].len() {
+                    if matched == inner_node.count as usize {
                         // Case 3: we found an inner node, with a matching prefix.
                         //
                         // In this case we recursively insert our node into this inner node, making
@@ -388,7 +386,7 @@ impl<T: Element> RawART<T> {
                                 return insert_raw_recursive(next_ptr, e, digits, consumed + 1);
                             }
                             let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
-                            RawNode::insert(&mut (nod as *mut _), d, c_ptr);
+                            nod.insert(d, c_ptr, curr_unsafe);
                             return Ok(());
                         });
                     } else {
@@ -401,10 +399,12 @@ impl<T: Element> RawART<T> {
                             by: usize,
                             leaf: Option<*const T>,
                             consumed: usize,
-                        ) {
+                        ) -> u8 {
+                            debug_assert!(by > 0);
                             let old_count = n.count as usize;
                             n.count -= by as u32;
                             let start: *const _ = &n.prefix[by];
+                            let res = n.prefix[by-1];
                             // first we want to copy everything over
                             ptr::copy(start, &mut n.prefix[0], PREFIX_LEN - by);
                             if old_count > PREFIX_LEN {
@@ -416,20 +416,21 @@ impl<T: Element> RawART<T> {
                                     *p = d;
                                 }
                             }
+                            res
                         }
-                        let common_prefix_digits = &digits[consumed..matched];
+                        debug_assert!(inner_node.count > 0, "Found 0 inner_node.count in split case, matched={:?}", matched);
+                        let common_prefix_digits = &digits[consumed..consumed+matched];
                         let n4: Box<RawNode<Node4<T>>> =
                             make_node_with_prefix(&common_prefix_digits[..]);
                         debug_assert_eq!(n4.count as usize, common_prefix_digits.len());
                         consumed += n4.count as usize;
                         let by = inner_node.count as usize - common_prefix_digits.len();
-                        adjust_prefix(inner_node, by, min_ref, consumed);
+                        let inner_d = adjust_prefix(inner_node, by, min_ref, consumed);
                         let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                         let mut n4_raw = Box::into_raw(n4);
                         // XXX: here we know that n4_raw will not get upgraded, that's the only
                         // reason re-using it here is safe.
-                        RawNode::insert(&mut n4_raw, digits[consumed], c_ptr);
-                        debug_assert!(inner_node.count > 0);
+                        (*n4_raw).insert(digits[consumed], c_ptr, curr_unsafe);
 
                         // We want to insert curr into n4, that means we need to figure out
                         // what its initial digit should be.
@@ -445,7 +446,7 @@ impl<T: Element> RawART<T> {
                         //   mem::swap(curr, &mut n4_cptr);
                         //   RawNode::insert(&mut n4_raw, inner_node.prefix[0], n4_cptr);
                         //   return Ok(());
-                        Branch::B2(n4_raw, inner_node.prefix[0])
+                        Branch::B2(n4_raw, inner_d)
                     }
                 }
             };
@@ -460,17 +461,13 @@ impl<T: Element> RawART<T> {
                     let mut leaf_ptr = ChildPtr::from_node(n4_raw);
                     let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                     mem::swap(curr, &mut leaf_ptr);
-                    RawNode::insert(
-                        &mut n4_raw,
-                        leaf_digits[consumed + prefix_len - 1],
-                        leaf_ptr,
-                    );
-                    RawNode::insert(&mut n4_raw, digits[consumed + prefix_len - 1], new_leaf);
+                    (*n4_raw).insert(leaf_digits[consumed + prefix_len], leaf_ptr, curr);
+                    (*n4_raw).insert(digits[consumed + prefix_len], new_leaf, curr);
                 }
-                Branch::B2(mut n4_raw, d) => {
+                Branch::B2(n4_raw, d) => {
                     let mut n4_cptr = ChildPtr::from_node(n4_raw);
                     mem::swap(curr, &mut n4_cptr);
-                    RawNode::insert(&mut n4_raw, d, n4_cptr);
+                    (*n4_raw).insert(d, n4_cptr, curr);
                 }
             }
             Ok(())
@@ -664,7 +661,7 @@ enum DeleteResult<T> {
 
 trait Node<T>: Sized {
     // insert assumes that 'd' is not present here already
-    unsafe fn insert(curr: &mut *mut Self, d: u8, ptr: ChildPtr<T>);
+    unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, pptr: &mut ChildPtr<T>);
     unsafe fn delete(&mut self, d: u8) -> DeleteResult<T>;
     // TODO add a `delete` method
     fn get_min(&self) -> Option<&T>;
@@ -703,12 +700,14 @@ fn make_node_with_prefix<T>(prefix: &[u8]) -> Box<RawNode<Node4<T>>> {
         },
     });
     let new_len = cmp::min(prefix.len(), PREFIX_LEN);
-    unsafe {
-        ptr::copy_nonoverlapping(
-            &prefix[0] as *const _,
-            &mut new_node.prefix[0] as *mut _,
-            new_len,
-        );
+    if prefix.len() > 0 {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                &prefix[0] as *const _,
+                &mut new_node.prefix[0] as *mut _,
+                new_len,
+            );
+        }
     }
     new_node
 }
@@ -736,13 +735,16 @@ mod node_variants {
     impl<T> RawNode<Node4<T>> {
         fn find_internal(&self, d: u8) -> Option<(usize, *mut ChildPtr<T>)> {
             debug_assert!(self.children <= 4);
+            if self.children == 0 {
+                return None;
+            }
             for i in 0..4 {
                 if self.node.keys[i] == d {
                     unsafe {
                         return Some((i, self.node.ptrs.get_unchecked(i) as *const _ as *mut _));
                     };
                 }
-                if i == self.children as usize {
+                if i == (self.children - 1) as usize {
                     return None;
                 }
             }
@@ -792,50 +794,52 @@ mod node_variants {
             }
         }
 
-        unsafe fn insert(curr: &mut *mut RawNode<Node4<T>>, d: u8, ptr: ChildPtr<T>) {
-            debug_assert_eq!((**curr).typ, NODE_4);
-            let slf: &mut RawNode<Node4<T>> = &mut **curr;
-            if slf.children == 4 {
+        unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, pptr: &mut ChildPtr<T>) {
+            if self.children == 4 {
                 let new_node = &mut *Box::into_raw(Box::new(RawNode {
                     typ: NODE_16,
-                    children: slf.children,
-                    count: slf.count,
-                    prefix: slf.prefix,
+                    children: self.children,
+                    count: self.count,
+                    prefix: self.prefix,
                     node: Node16 {
                         keys: [0; 16],
                         ptrs: mem::transmute::<[usize; 16], [ChildPtr<T>; 16]>([0 as usize; 16]),
                     },
                 }));
-                ptr::swap_nonoverlapping(&mut slf.node.keys[0], &mut new_node.node.keys[0], 4);
-                ptr::swap_nonoverlapping(&mut slf.node.ptrs[0], &mut new_node.node.ptrs[0], 4);
-                let new_node_raw = new_node as *mut _ as *mut RawNode<Node4<T>>;
-                *curr = new_node_raw;
-                // free the old node
-                mem::drop(Box::from_raw(slf));
-                // make the recursive call
-                return RawNode::<Node16<T>>::insert(mem::transmute(curr), d, ptr);
+                ptr::swap_nonoverlapping(&mut self.node.keys[0], &mut new_node.node.keys[0], 4);
+                ptr::swap_nonoverlapping(&mut self.node.ptrs[0], &mut new_node.node.ptrs[0], 4);
+                let new_cptr = ChildPtr::from_node(new_node);
+                *pptr = new_cptr;
+                return new_node.insert(d, ptr, pptr);
             }
             for i in 0..4 {
-                if i == (slf.children as usize) {
+                if i == (self.children as usize) {
                     // found an empty slot!
-                    debug_assert_eq!(slf.node.keys[i], 0);
-                    slf.node.keys[i] = d;
-                    slf.node.ptrs[i] = ptr;
-                    slf.children += 1;
+                    debug_assert_eq!(self.node.keys[i], 0);
+                    self.node.keys[i] = d;
+                    self.node.ptrs[i] = ptr;
+                    self.children += 1;
                     return;
                 }
-                let cur_digit = slf.node.keys[i];
-                eprintln!("n4insert: i={:?} d={:?}, cur={:?}", i, d, cur_digit);
-                debug_assert!(cur_digit != d);
+                let cur_digit = self.node.keys[i];
+                debug_assert!(
+                    cur_digit != d,
+                    "Found matching current digit! cur_digit={:?}, prefix={:?}, count={:?}, children={:?} keys={:?}",
+                    cur_digit,
+                    &self.prefix[..],
+                    self.count,
+                    self.children,
+                    &self.node.keys[..],
+                );
                 if cur_digit > d {
                     // we keep the list sorted, so we need to move all other entries ahead by 1
                     // slot. This is not safe if it's already full.
-                    if slf.children == 4 {
+                    if self.children == 4 {
                         break;
                     }
-                    place_in_hole_at(&mut slf.node.keys[..], i, d, 4);
-                    place_in_hole_at(&mut slf.node.ptrs[..], i, ptr, 4);
-                    slf.children += 1;
+                    place_in_hole_at(&mut self.node.keys[..], i, d, 4);
+                    place_in_hole_at(&mut self.node.ptrs[..], i, ptr, 4);
+                    self.children += 1;
                     return;
                 }
             }
@@ -916,44 +920,43 @@ mod node_variants {
             }
         }
 
-        unsafe fn insert(curr: &mut *mut RawNode<Node16<T>>, d: u8, ptr: ChildPtr<T>) {
-            debug_assert_eq!((**curr).typ, NODE_16);
-            let slf: &mut RawNode<Node16<T>> = &mut **curr;
-            let mask = (1 << (slf.children as usize)) - 1;
-            if slf.children == 16 {
+        unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, pptr: &mut ChildPtr<T>) {
+            let mask = (1 << (self.children as usize)) - 1;
+            if self.children == 16 {
                 // upgrade
                 let new_node = &mut *Box::into_raw(Box::new(RawNode {
                     typ: NODE_48,
                     children: 16,
-                    count: slf.count,
-                    prefix: slf.prefix,
+                    count: self.count,
+                    prefix: self.prefix,
                     node: Node48 {
                         keys: [0; 256],
                         ptrs: mem::transmute::<[usize; 48], [ChildPtr<T>; 48]>([0 as usize; 48]),
                     },
                 }));
                 for i in 0..16 {
-                    let ix = slf.node.keys[i] as usize;
+                    let ix = self.node.keys[i] as usize;
                     mem::swap(
-                        slf.node.ptrs.get_unchecked_mut(ix),
+                        self.node.ptrs.get_unchecked_mut(i),
                         new_node.node.ptrs.get_unchecked_mut(i),
                     );
+                    new_node.node.keys[ix] = i as u8 + 1;
                 }
-                let rev_cur = curr as *mut _ as *mut *mut RawNode<Node48<T>>;
-                *rev_cur = new_node;
-                mem::drop(Box::from_raw(slf));
-                RawNode::<Node48<T>>::insert(&mut *rev_cur, d, ptr);
+                let new_cptr = ChildPtr::from_node(new_node);
+                *pptr = new_cptr;
+                new_node.insert(d, ptr, pptr);
                 return;
             }
             #[cfg(all(any(target_arch = "x86_64", target_arch = "x86"), target_feature = "sse2"))]
             {
-                let ks = simd::u8x16::load(&slf.node.keys[..], 0);
+                let ks = simd::u8x16::load(&self.node.keys[..], 0);
                 let d_splat = simd::u8x16::splat(d);
                 let comps = d_splat.lt(ks);
                 let bits = vendor::_mm_movemask_epi8(mem::transmute(comps)) & mask;
-                let target = bits.trailing_zeros() as usize;
-                place_in_hole_at(&mut slf.node.keys[..], target, d, 16);
-                place_in_hole_at(&mut slf.node.ptrs[..], target, ptr, 16);
+                // XXX get rid of this!
+                let target = cmp::min(self.children as usize - 1, bits.trailing_zeros() as usize);
+                place_in_hole_at(&mut self.node.keys[..], target, d, 16);
+                place_in_hole_at(&mut self.node.ptrs[..], target, ptr, 16);
             }
             #[cfg(not(all(any(target_arch = "x86_64", target_arch = "x86"),
                           target_feature = "sse2")))]
@@ -961,7 +964,7 @@ mod node_variants {
                 // copy over Node16 implementation
                 unimplemented!()
             }
-            slf.children += 1;
+            self.children += 1;
         }
     }
 
@@ -997,10 +1000,23 @@ mod node_variants {
             }
             unreachable!()
         }
+
+        #[inline(always)]
+        fn state_valid(&self)  {
+            #[cfg(debug_assertions)]
+            {
+                let mut present = 0;
+                for ix in &self.node.keys[..] {
+                    present += if *ix > 0 { 1 } else { 0 }
+                }
+                assert_eq!(present, self.children, "Only see {:?} present but have {:?} children", present, self.children)
+            }
+        }
     }
 
     impl<T> Node<T> for RawNode<Node48<T>> {
         fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
+            self.state_valid();
             let ix = unsafe { *self.node.keys.get_unchecked(d as usize) as usize };
             if ix == 0 {
                 None
@@ -1012,6 +1028,7 @@ mod node_variants {
         }
 
         fn get_min(&self) -> Option<&T> {
+            self.state_valid();
             unsafe {
                 self.get_min_inner()
                     .and_then(|(_, t)| match (*t).get().unwrap() {
@@ -1022,6 +1039,7 @@ mod node_variants {
         }
 
         unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> {
+            self.state_valid();
             match self.find_raw(d) {
                 None => DeleteResult::Failure,
                 Some(p) => {
@@ -1044,39 +1062,39 @@ mod node_variants {
             }
         }
 
-        unsafe fn insert(curr: &mut *mut RawNode<Node48<T>>, d: u8, ptr: ChildPtr<T>) {
-            debug_assert_eq!((**curr).typ, NODE_48);
-            let slf: &mut RawNode<Node48<T>> = &mut **curr;
-            debug_assert!(slf.children <= 48);
-            if slf.children == 48 {
+        unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, pptr: &mut ChildPtr<T>) {
+            self.state_valid();
+            debug_assert!(self.children <= 48);
+            if self.children == 48 {
                 let new_node = &mut *Box::into_raw(Box::new(RawNode {
                     typ: NODE_256,
                     children: 48,
-                    count: slf.count,
-                    prefix: slf.prefix,
+                    count: self.count,
+                    prefix: self.prefix,
                     node: Node256 {
                         ptrs: mem::transmute::<[usize; 256], [ChildPtr<T>; 256]>([0 as usize; 256]),
                     },
                 }));
                 for i in 0..256 {
-                    let ix = *slf.node.keys.get_unchecked(i) as usize;
-                    mem::swap(
-                        slf.node.ptrs.get_unchecked_mut(ix),
-                        new_node.node.ptrs.get_unchecked_mut(i),
-                    );
+                    let ix = *self.node.keys.get_unchecked(i) as usize;
+                    if ix > 0 {
+                        mem::swap(
+                            self.node.ptrs.get_unchecked_mut(ix - 1),
+                            new_node.node.ptrs.get_unchecked_mut(i),
+                        );
+                    }
                 }
-                let rev_cur = curr as *mut _ as *mut *mut RawNode<Node256<T>>;
-                *rev_cur = new_node;
-                mem::drop(Box::from_raw(slf));
-                RawNode::<Node256<T>>::insert(&mut *rev_cur, d, ptr);
+                new_node.insert(d, ptr, pptr);
+                let new_cptr = ChildPtr::from_node(new_node);
+                *pptr = new_cptr;
                 return;
             }
             for i in 0..48 {
-                let slot = slf.node.ptrs.get_unchecked_mut(i);
+                let slot = self.node.ptrs.get_unchecked_mut(i);
                 if slot.is_null() {
                     ptr::write(slot, ptr);
-                    slf.node.keys[d as usize] = i as u8 + 1;
-                    slf.children += 1;
+                    self.node.keys[d as usize] = i as u8 + 1;
+                    self.children += 1;
                     return;
                 }
             }
@@ -1142,13 +1160,11 @@ mod node_variants {
             DeleteResult::Success(deleted)
         }
 
-        unsafe fn insert(curr: &mut *mut RawNode<Node256<T>>, d: u8, ptr: ChildPtr<T>) {
-            debug_assert_eq!((**curr).typ, NODE_256);
-            let slf: &mut RawNode<Node256<T>> = &mut **curr;
-            debug_assert!(slf.children <= 256);
-            debug_assert!(slf.node.ptrs[d as usize].is_null());
-            slf.children += 1;
-            ptr::write(slf.node.ptrs.get_unchecked_mut(d as usize), ptr);
+        unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, _: &mut ChildPtr<T>) {
+            debug_assert!(self.children <= 256);
+            debug_assert!(self.node.ptrs[d as usize].is_null());
+            self.children += 1;
+            ptr::write(self.node.ptrs.get_unchecked_mut(d as usize), ptr);
         }
     }
 }
@@ -1156,30 +1172,82 @@ mod node_variants {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::super::rand;
+    use super::super::rand::Rng;
+
+    fn random_vec(max_val: u64, len: usize) -> Vec<u64> {
+        let mut rng = rand::thread_rng();
+        (0..len).map(|_| rng.gen_range::<u64>(0, max_val)).collect()
+    }
 
     #[test]
     fn basic_set_behavior() {
         let mut s = ARTSet::<u64>::new();
-        // Empty set has length 0
-        assert_eq!(s.len(), 0);
+        // // Empty set has length 0
+        // assert_eq!(s.len(), 0);
 
-        // Add 0
-        assert!(!s.add(0));
-        assert_eq!(s.len(), 1);
-        assert!(s.contains_val(0));
+        // // Add 0
+        // assert!(!s.add(0));
+        // assert_eq!(s.len(), 1);
+        // assert!(s.contains_val(0));
 
-        // Remove 0
-        assert!(s.remove_val(0));
-        assert_eq!(s.len(), 0);
-        assert!(!s.contains_val(0));
+        // // Remove 0
+        // assert!(s.remove_val(0));
+        // assert_eq!(s.len(), 0);
+        // assert!(!s.contains_val(0));
 
-        // Add 1 then 0
-        assert!(!s.add(1010));
-        assert_eq!(s.len(), 1);
-        assert!(!s.add(2020));
-        assert_eq!(s.len(), 2);
-        assert!(s.contains_val(1010));
-        assert!(s.contains_val(2020));
+        // // Add 1 then 0
+        // assert!(!s.add(1010));
+        // assert_eq!(s.len(), 1);
+        // assert!(!s.add(2020));
+        // assert_eq!(s.len(), 2);
+        // assert!(s.contains_val(1010));
+        // assert!(s.contains_val(2020));
+        // fast path:
+        // TODO getting occasional failures
+        //      Implement a basic callback-based iterator algorithm to figure out which (and how
+        //      many) nodes are missing. Might be a good way to figure out what went wrong.
+        let v1 = random_vec(!0, 1 << 18);
+        for item in v1.iter() {
+            s.add(*item);
+            assert!(s.contains(item));
+            
+        }
+        let mut will_fail = false;
+        for item in v1.iter() {
+            if !s.contains(item) {
+                will_fail = true;
+                break;
+            }
+        }
+        assert!(!will_fail);
+        // if will_fail {
+        //     // slow path
+        //     for ix in 0..v1.len() {
+        //         s.add(v1[ix]);
+        //         for item in &v1[0..ix+1] {
+        //             assert!(s.contains(item), "Failed to find {:?} broke on adding {:?}", item, v1[ix]);
+        //         }
+        //     }
+        // }
+        
+
+        // Insert several things. They should all be there.
+        // for ix in 0..v1.len() {
+        //     
+        //     s.add(v1[ix]);
+        //     for item in &v1[0..ix+1] {
+        //         assert!(s.contains(item), "Failed to find {:?} broke on adding {:?}", item, v1[ix]);
+        //     }
+        // }
+        // for item in v1.iter() {
+        //     s.add(*item);
+        // }
+        // let mut ix = 0;
+        // for item in v1.iter() {
+        //     let ds: Vec<_> = item.digits().collect();
+        //     ix += 1;
+        // }
     }
 
 }
