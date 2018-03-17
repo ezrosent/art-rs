@@ -264,8 +264,11 @@ impl<T: Element> RawART<T> {
                     }
                 }
                 Err(inner_node) => {
-                    let (matched, _) =
-                        inner_node.get_matching_prefix(&digits[..], PhantomData as PhantomData<T>);
+                    let (matched, _) = inner_node.get_matching_prefix(
+                        &digits[..],
+                        0,
+                        PhantomData as PhantomData<T>,
+                    );
                     if matched == inner_node.count as usize {
                         // the prefix matched! we recur
                         debug_assert!(digits.len() > matched);
@@ -359,8 +362,12 @@ impl<T: Element> RawART<T> {
                 }
                 Err(inner_node) => {
                     // found an interior node. need to continue the search!
-                    let (matched, min_ref) = inner_node
-                        .get_matching_prefix(&digits[consumed..], PhantomData as PhantomData<T>);
+                    let (matched, min_ref) = inner_node.get_matching_prefix(
+                        &digits[..],
+                        consumed,
+                        PhantomData as PhantomData<T>,
+                    );
+
                     if matched == inner_node.count as usize {
                         // Case 3: we found an inner node, with a matching prefix.
                         //
@@ -390,6 +397,7 @@ impl<T: Element> RawART<T> {
                             return Ok(());
                         });
                     } else {
+                        let inner_d = inner_node.prefix[matched];
                         // Case 4: Our inner node shares a non-matching prefix with the current node.
                         //
                         // Here we have to figure out where the mismatch is and create a new parent
@@ -399,14 +407,17 @@ impl<T: Element> RawART<T> {
                             by: usize,
                             leaf: Option<*const T>,
                             consumed: usize,
-                        ) -> u8 {
+                        ) {
                             debug_assert!(by > 0);
+                            debug_assert!(by <= n.count as usize, "by={:?} > n.count={:?}", by, n.count);
+                            // if n.count == 2 {
+                            //     eprintln!("by={:?} n.count={:?} prefix={:?}", by, n.count, &n.prefix[..]);
+                            // }
                             let old_count = n.count as usize;
                             n.count -= by as u32;
                             let start: *const _ = &n.prefix[by];
-                            let res = n.prefix[by-1];
                             // first we want to copy everything over
-                            ptr::copy(start, &mut n.prefix[0], PREFIX_LEN - by);
+                            ptr::copy(start, &mut n.prefix[0], n.count as usize);
                             if old_count > PREFIX_LEN {
                                 let leaf_ref = &*leaf.unwrap();
                                 for (p, d) in n.prefix[PREFIX_LEN - by..]
@@ -416,18 +427,33 @@ impl<T: Element> RawART<T> {
                                     *p = d;
                                 }
                             }
-                            res
                         }
-                        debug_assert!(inner_node.count > 0, "Found 0 inner_node.count in split case, matched={:?}", matched);
-                        let common_prefix_digits = &digits[consumed..consumed+matched];
+                        debug_assert!(
+                            inner_node.count > 0,
+                            "Found 0 inner_node.count in split case, matched={:?}",
+                            matched
+                        );
+                        let common_prefix_digits = &digits[consumed..consumed + matched];
+                        debug_assert_eq!(common_prefix_digits.len(), matched);
                         let n4: Box<RawNode<Node4<T>>> =
                             make_node_with_prefix(&common_prefix_digits[..]);
                         debug_assert_eq!(n4.count as usize, common_prefix_digits.len());
                         consumed += n4.count as usize;
-                        let by = inner_node.count as usize - common_prefix_digits.len();
-                        let inner_d = adjust_prefix(inner_node, by, min_ref, consumed);
+                        // XXX OBO-error?
+                        let by = matched + 1; // inner_node.count as usize - common_prefix_digits.len();
+                        adjust_prefix(inner_node, by, min_ref, consumed);
                         let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                         let mut n4_raw = Box::into_raw(n4);
+                        // eprintln!(
+                        //     "case 4: cnt={:?} => {:?} inner_d={:?} matched={:?} curr(after)={:?} digits={:?} n4={:?}",
+                        //     _old_count,
+                        //     inner_node.count,
+                        //     inner_d,
+                        //     matched,
+                        //     curr_unsafe.get().unwrap().err().unwrap(),
+                        //     &digits[consumed..],
+                        //     &mut *(n4_raw as *mut RawNode<()>)
+                        // );
                         // XXX: here we know that n4_raw will not get upgraded, that's the only
                         // reason re-using it here is safe.
                         (*n4_raw).insert(digits[consumed], c_ptr, curr_unsafe);
@@ -468,6 +494,7 @@ impl<T: Element> RawART<T> {
                     let mut n4_cptr = ChildPtr::from_node(n4_raw);
                     mem::swap(curr, &mut n4_cptr);
                     (*n4_raw).insert(d, n4_cptr, curr);
+                    // eprintln!("Split! {:?}", &*n4_raw);
                 }
             }
             Ok(())
@@ -600,11 +627,12 @@ impl RawNode<()> {
     fn get_matching_prefix<T: Element>(
         &self,
         digits: &[u8],
+        consumed: usize,
         _marker: PhantomData<T>,
     ) -> (usize, Option<*const T>) {
         let count = cmp::min(self.count as usize, PREFIX_LEN);
         for i in 0..count {
-            if digits[i] != self.prefix[i] {
+            if digits[consumed + i] != self.prefix[i] {
                 return (i, None);
             }
         }
@@ -616,9 +644,9 @@ impl RawNode<()> {
                 {
                     let min_node = node.get_min()
                         .expect("node with implicit prefix must be nonempty");
-                    for (d, m) in digits[PREFIX_LEN..]
+                    for (d, m) in digits[consumed + PREFIX_LEN..]
                         .iter()
-                        .zip(min_node.key().digits().skip(PREFIX_LEN))
+                        .zip(min_node.key().digits().skip(consumed + PREFIX_LEN))
                     {
                         if *d != m {
                             break;
@@ -723,6 +751,12 @@ struct Node4<T> {
     ptrs: [ChildPtr<T>; 4],
 }
 
+impl<T> ::std::fmt::Debug for Node4<T> {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
+        write!(f, "Node4({:?}, {:?})", self.keys, &self.ptrs[..])
+    }
+}
+
 mod node_variants {
     use super::*;
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -735,20 +769,17 @@ mod node_variants {
     impl<T> RawNode<Node4<T>> {
         fn find_internal(&self, d: u8) -> Option<(usize, *mut ChildPtr<T>)> {
             debug_assert!(self.children <= 4);
-            if self.children == 0 {
-                return None;
-            }
             for i in 0..4 {
+                if i == self.children as usize {
+                    break;
+                }
                 if self.node.keys[i] == d {
                     unsafe {
                         return Some((i, self.node.ptrs.get_unchecked(i) as *const _ as *mut _));
                     };
                 }
-                if i == (self.children - 1) as usize {
-                    return None;
-                }
             }
-            unreachable!()
+            None
         }
     }
 
@@ -795,6 +826,7 @@ mod node_variants {
         }
 
         unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, pptr: &mut ChildPtr<T>) {
+            debug_assert!(self.find_raw(d).is_none());
             if self.children == 4 {
                 let new_node = &mut *Box::into_raw(Box::new(RawNode {
                     typ: NODE_16,
@@ -834,6 +866,7 @@ mod node_variants {
                 if cur_digit > d {
                     // we keep the list sorted, so we need to move all other entries ahead by 1
                     // slot. This is not safe if it's already full.
+                    // XXX: this seems unnecessary due to check at top of the method
                     if self.children == 4 {
                         break;
                     }
@@ -921,6 +954,7 @@ mod node_variants {
         }
 
         unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, pptr: &mut ChildPtr<T>) {
+            debug_assert!(self.find_raw(d).is_none());
             let mask = (1 << (self.children as usize)) - 1;
             if self.children == 16 {
                 // upgrade
@@ -1002,14 +1036,18 @@ mod node_variants {
         }
 
         #[inline(always)]
-        fn state_valid(&self)  {
+        fn state_valid(&self) {
             #[cfg(debug_assertions)]
             {
                 let mut present = 0;
                 for ix in &self.node.keys[..] {
                     present += if *ix > 0 { 1 } else { 0 }
                 }
-                assert_eq!(present, self.children, "Only see {:?} present but have {:?} children", present, self.children)
+                assert_eq!(
+                    present, self.children,
+                    "Only see {:?} present but have {:?} children",
+                    present, self.children
+                )
             }
         }
     }
@@ -1063,6 +1101,7 @@ mod node_variants {
         }
 
         unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, pptr: &mut ChildPtr<T>) {
+            debug_assert!(self.find_raw(d).is_none());
             self.state_valid();
             debug_assert!(self.children <= 48);
             if self.children == 48 {
@@ -1076,13 +1115,17 @@ mod node_variants {
                     },
                 }));
                 for i in 0..256 {
-                    let ix = *self.node.keys.get_unchecked(i) as usize;
-                    if ix > 0 {
-                        mem::swap(
-                            self.node.ptrs.get_unchecked_mut(ix - 1),
-                            new_node.node.ptrs.get_unchecked_mut(i),
-                        );
+                    if let Some(node_ptr) = self.find_raw(i as u8) {
+                        debug_assert!(i != d as usize, "{:?} == {:?}", i, d);
+                        mem::swap(&mut *node_ptr, new_node.node.ptrs.get_unchecked_mut(i))
                     }
+                    // let ix = *self.node.keys.get_unchecked(i) as usize;
+                    // if ix > 0 {
+                    //     mem::swap(
+                    //         self.node.ptrs.get_unchecked_mut(ix - 1),
+                    //         new_node.node.ptrs.get_unchecked_mut(i),
+                    //     );
+                    // }
                 }
                 new_node.insert(d, ptr, pptr);
                 let new_cptr = ChildPtr::from_node(new_node);
@@ -1106,12 +1149,24 @@ mod node_variants {
         ptrs: [ChildPtr<T>; 256],
     }
 
+    impl<T> ::std::fmt::Debug for Node256<T> {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
+            let mut ix = 0;
+            let v: Vec<_> = self.ptrs.iter().map(|cp| {
+                let res = (ix, cp);
+                ix += 1;
+                res
+            }).collect();
+            write!(f, "Node256({:?})", v)
+        }
+    }
+
     impl<T> Node<T> for RawNode<Node256<T>> {
         fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
             unsafe {
-                let p: *mut ChildPtr<T> =
-                    self.node.ptrs.get_unchecked(d as usize) as *const _ as *mut _;
-                if p.is_null() {
+                let p = self.node.ptrs.get_unchecked(d as usize) as *const ChildPtr<T>
+                    as *mut ChildPtr<T>;
+                if (*p).is_null() {
                     None
                 } else {
                     Some(p)
@@ -1161,6 +1216,7 @@ mod node_variants {
         }
 
         unsafe fn insert(&mut self, d: u8, ptr: ChildPtr<T>, _: &mut ChildPtr<T>) {
+            debug_assert!(self.find_raw(d).is_none(), "d={:?} IN {:?}", d, self);
             debug_assert!(self.children <= 256);
             debug_assert!(self.node.ptrs[d as usize].is_null());
             self.children += 1;
@@ -1211,16 +1267,46 @@ mod tests {
         for item in v1.iter() {
             s.add(*item);
             assert!(s.contains(item));
-            
         }
-        let mut will_fail = false;
+        let mut missing = Vec::new();
+        let mut ix = 0;
         for item in v1.iter() {
             if !s.contains(item) {
-                will_fail = true;
-                break;
+                missing.push((*item, ix))
             }
+            ix += 1;
         }
-        assert!(!will_fail);
+
+        let mut s2 = ARTSet::<u64>::new();
+        ix = 0;
+        'outer: for item in v1.iter() {
+            s2.add(*item);
+            for &(missed, i) in missing.iter() {
+                if i <= ix && !s2.contains_val(missed) {
+                    let vi: Vec<_> = item.digits().collect();
+                    let vm: Vec<_> = missed.digits().collect();
+                    eprintln!(
+                        "{:?}:{:?} goes missing when adding {:?}:{:?} at {:?}",
+                        missed,
+                        &vm[..],
+                        *item,
+                        &vi[..],
+                        ix
+                    );
+                    break 'outer;
+                }
+            }
+            ix += 1;
+        }
+
+        let v: Vec<_> = missing
+            .iter()
+            .map(|&(x, _)| {
+                let v: Vec<_> = x.digits().collect();
+                (x, v)
+            })
+            .collect();
+        assert_eq!(missing.len(), 0, "missing={:?}", v);
         // if will_fail {
         //     // slow path
         //     for ix in 0..v1.len() {
@@ -1230,11 +1316,10 @@ mod tests {
         //         }
         //     }
         // }
-        
 
         // Insert several things. They should all be there.
         // for ix in 0..v1.len() {
-        //     
+        //
         //     s.add(v1[ix]);
         //     for item in &v1[0..ix+1] {
         //         assert!(s.contains(item), "Failed to find {:?} broke on adding {:?}", item, v1[ix]);
