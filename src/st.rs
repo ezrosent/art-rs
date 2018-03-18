@@ -209,6 +209,7 @@ impl<T: Element> RawART<T> {
         }
         lookup_raw_recursive(&self.root, k, digits.as_slice())
     }
+
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
@@ -252,7 +253,11 @@ impl<T: Element> RawART<T> {
                                     }
                                 }
                             );
-                            if let Some(c_ptr) = asgn {
+                            if let Some(mut c_ptr) = asgn {
+                                if let Err(inner) = c_ptr.get_mut().unwrap() {
+                                    inner.append_prefix(d);
+                                }
+                                // need to add d as a prefix to c_ptr
                                 *parent_ref = c_ptr;
                             }
                             return res;
@@ -628,6 +633,17 @@ struct RawNode<Footer> {
     prefix: [u8; PREFIX_LEN],
     node: Footer,
 }
+
+impl<T> RawNode<T> {
+    fn append_prefix(&mut self, d: u8) {
+        unsafe {
+            ptr::copy(&self.prefix[0], &mut self.prefix[1], PREFIX_LEN-1);
+        }
+        self.prefix[0] = d;
+        self.count += 1;
+    }
+}
+
 impl RawNode<()> {
     fn get_matching_prefix<T: Element>(
         &self,
