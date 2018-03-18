@@ -30,6 +30,11 @@ impl Iterator for U64BytesIterator {
             None
         }
     }
+
+    // fn nth(&mut self, n: usize) -> Option<u8> {
+    //     self.cursor += n;
+    //     self.next()
+    // }
 }
 
 impl<'a> Digital<'a> for u64 {
@@ -69,6 +74,20 @@ impl<I: Iterator<Item = u8>> Iterator for NullTerminate<I> {
             res
         }
     }
+
+    // fn nth(&mut self, n: usize) -> Option<u8> {
+    //     if self.done { return None; }
+    //     let (remaining, _max) = self.i.size_hint();
+    //     //
+    //     debug_assert_eq!(Some(remaining), _max,
+    //     "must use iterator with exact length for NullTerminate");
+    //     if n + 1 == remaining {
+    //         self.done = true;
+    //         Some(0)
+    //     } else {
+    //         self.i.nth(n)
+    //     }
+    // }
 }
 
 impl<'a> Digital<'a> for str {
