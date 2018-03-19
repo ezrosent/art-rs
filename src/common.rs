@@ -7,14 +7,14 @@ use self::byteorder::{BigEndian, ByteOrder};
 /// `Digital` describes types that can be expressed as sequences of bytes.
 ///
 /// The type's `digits` should respect equality and ordering on the type.
+/// Furthermore, if the `digits` of one value are a prefix of the `digits`
+/// of another value of the same type, the two values must be equal.
 pub trait Digital<'a> {
     type I: Iterator<Item = u8> + 'a;
     fn digits(&'a self) -> Self::I;
 }
 
 // TODO: Add implementation for the rest of the numeric, string types
-// TODO: add implementations of `nth` here to speed up use of `skip` in ART implementation
-
 pub struct U64BytesIterator {
     cursor: usize,
     bytes: [u8; 8],
@@ -31,10 +31,10 @@ impl Iterator for U64BytesIterator {
         }
     }
 
-    // fn nth(&mut self, n: usize) -> Option<u8> {
-    //     self.cursor += n;
-    //     self.next()
-    // }
+    fn nth(&mut self, n: usize) -> Option<u8> {
+        self.cursor += n;
+        self.next()
+    }
 }
 
 impl<'a> Digital<'a> for u64 {
@@ -49,6 +49,20 @@ impl<'a> Digital<'a> for u64 {
     }
 }
 
+/// NullTerminate transforms iterator corresponding to the bytes of a valid UTF-8 string into an
+/// iterator suitable for use in a `Digital` implementation. This comes for free in languages using
+/// C-style ASCII strings by convention, because null-termination guarantees the "prefixes"
+/// property of the trait.
+///
+/// In Rust, strings are most commonly encoded as UTF-8. For such strings,  NUL characters are
+/// kosher in the middle of a string, and picking a different byte as a terminator character will
+/// ruin the compatibility with Ord[0]. To ensure that a null terminator is valid, we increase the
+/// value of all bytes emitted by `I` by 1. We are guaranteed no overflow by the fact that 255 is
+/// an invalid byte for UTF-8 strings. Given no overflow, equality and ordering are clearly
+/// conserved.
+///
+/// [0]: To see why this is the case, consider the example of "" and "a". "" < "a", but "\u{255}" >
+/// "a\u{255}".
 pub struct NullTerminate<I> {
     done: bool,
     i: I,
@@ -67,27 +81,32 @@ impl<I: Iterator<Item = u8>> Iterator for NullTerminate<I> {
             return None;
         }
         let res = self.i.next();
-        if res.is_none() {
+        if let Some(s) = res {
+            debug_assert!(s < 255);
+            Some(s + 1)
+        } else {
             self.done = true;
             Some(0)
-        } else {
-            res
         }
     }
 
-    // fn nth(&mut self, n: usize) -> Option<u8> {
-    //     if self.done { return None; }
-    //     let (remaining, _max) = self.i.size_hint();
-    //     //
-    //     debug_assert_eq!(Some(remaining), _max,
-    //     "must use iterator with exact length for NullTerminate");
-    //     if n + 1 == remaining {
-    //         self.done = true;
-    //         Some(0)
-    //     } else {
-    //         self.i.nth(n)
-    //     }
-    // }
+    fn nth(&mut self, n: usize) -> Option<u8> {
+        if self.done {
+            return None;
+        }
+        let (remaining, _max) = self.i.size_hint();
+        debug_assert_eq!(
+            Some(remaining),
+            _max,
+            "must use iterator with exact length for NullTerminate"
+        );
+        if n + 1 == remaining {
+            self.done = true;
+            Some(0)
+        } else {
+            self.i.nth(n).map(|x| x + 1)
+        }
+    }
 }
 
 impl<'a> Digital<'a> for str {
