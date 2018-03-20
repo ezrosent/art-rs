@@ -1,6 +1,6 @@
 //! Single-threaded radix tree implementation based on HyPer's ART
-extern crate smallvec;
 extern crate simd;
+extern crate smallvec;
 
 #[cfg(target_arch = "x86")]
 use std::arch::x86::_mm_movemask_epi8;
@@ -45,77 +45,6 @@ impl<T: for<'a> Digital<'a> + PartialOrd> Element for ArtElement<T> {
     fn replace_matching(&mut self, other: &mut ArtElement<T>) {
         debug_assert!(self.matches(other.key()));
         mem::swap(self, other);
-    }
-}
-
-type DefaultArray<T> = [T; 8];
-
-struct BulkStore<T> {
-    len: usize,
-    set: u64,
-    data: DefaultArray<T>,
-}
-
-impl<T> BulkStore<T> {
-    fn new() -> Self {
-        BulkStore {
-            len: 0,
-            set: 0,
-            data: unsafe { mem::uninitialized() },
-        }
-    }
-
-    fn contains(&self, it: *mut T) -> bool {
-        let it_us = it as usize;
-        unsafe {
-            let start = self.data.get_unchecked(0) as *const T;
-            let end = start.offset(self.data.len() as isize);
-            it_us >= start as usize && it_us < end as usize
-        }
-    }
-
-    fn alloc(&mut self, it: T) -> *mut T {
-        match self.try_insert(it) {
-            Ok(ix) => unsafe { self.get_mut(ix) as *mut _ },
-            Err(it) => Box::into_raw(Box::new(it)),
-        }
-    }
-
-    fn try_insert(&mut self, it: T) -> Result<usize, T> {
-        debug_assert_eq!(self.set.count_ones() as usize, self.len);
-        if self.len == self.data.len() { return Err(it); }
-        let trailing = self.set.trailing_zeros();
-        let target = if trailing == 0 {
-            (!self.set).trailing_zeros()
-        } else {
-            trailing - 1
-        } as usize;
-        unsafe {
-            ptr::write(&mut self.data[target], it)
-        };
-        self.set |= 1 << target;
-        self.len += 1;
-        debug_assert_eq!(self.set.count_ones() as usize, self.len);
-        Ok(target)
-    }
-
-    unsafe fn get(&self, ix: usize) -> &T {
-        debug_assert!(ix < self.len);
-        debug_assert!((1 << ix) & self.set != 0);
-        self.data.get_unchecked(ix)
-    }
-
-    unsafe fn get_mut(&mut self, ix: usize) -> &mut T {
-        debug_assert!(ix < self.len);
-        debug_assert!((1 << ix) & self.set != 0);
-        self.data.get_unchecked_mut(ix)
-    }
-
-    unsafe fn mark_removed(&mut self, ix: usize) {
-        // must be used in concert with manual deinitialization via get_mut()
-        debug_assert!((1 << ix) & self.set != 0);
-        self.set &= !(1 << ix);
-        self.len -=1;
     }
 }
 
@@ -249,9 +178,6 @@ macro_rules! with_node {
 }
 
 impl<T: Element> RawART<T> {
-    // TODO add support for skipping the `matches` check when no optimistic prefixes are
-    // encountered (this should happen e.g. for all integer keys)
-
     pub fn new() -> Self {
         RawART {
             len: 0,
@@ -271,6 +197,7 @@ impl<T: Element> RawART<T> {
             curr: &ChildPtr<T>,
             k: &T::Key,
             digits: &[u8],
+            dont_check: bool,
         ) -> Option<*mut T> {
             // TODO: If Rust ever support proper tail-calls, this could be made tail-recursive.
             // In lieu of that, it's worth profiling this code to determine if an ugly iterative
@@ -279,7 +206,7 @@ impl<T: Element> RawART<T> {
             match curr.get_raw() {
                 None => None,
                 Some(Ok(leaf_node)) => {
-                    if (*leaf_node).matches(k) {
+                    if (dont_check && digits.len() == 0) || (*leaf_node).matches(k) {
                         Some(leaf_node)
                     } else {
                         None
@@ -287,9 +214,8 @@ impl<T: Element> RawART<T> {
                 }
                 Some(Err(inner_node)) => {
                     // handle prefixes now
-                    (*inner_node)
-                        .prefix_matches_optimistic(digits)
-                        .and_then(|consumed| {
+                    (*inner_node).prefix_matches_optimistic(digits).and_then(
+                        |(dont_check_new, consumed)| {
                             let new_digits = &digits[consumed..];
                             if new_digits.len() == 0 {
                                 // Our digits were entirely consumed, but this is a non-leaf node.
@@ -298,14 +224,20 @@ impl<T: Element> RawART<T> {
                             }
                             with_node!(&*inner_node, nod, {
                                 nod.find_raw(new_digits[0]).and_then(|next_node| {
-                                    lookup_raw_recursive(&*next_node, k, &new_digits[1..])
+                                    lookup_raw_recursive(
+                                        &*next_node,
+                                        k,
+                                        &new_digits[1..],
+                                        dont_check && dont_check_new,
+                                    )
                                 })
                             })
-                        })
+                        },
+                    )
                 }
             }
         }
-        lookup_raw_recursive(&self.root, k, digits.as_slice())
+        lookup_raw_recursive(&self.root, k, digits.as_slice(), true)
     }
 
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
@@ -344,6 +276,7 @@ impl<T: Element> RawART<T> {
                                 {
                                     match node.delete(d) {
                                         DeleteResult::Success(deleted) => {
+                                            // TODO: free up space here
                                             (Some(move_val_out(deleted)), None)
                                         }
                                         DeleteResult::Singleton { deleted, orphan } => {
@@ -784,7 +717,7 @@ impl RawNode<()> {
 }
 
 impl<T> RawNode<T> {
-    fn prefix_matches_optimistic(&self, digits: &[u8]) -> Option<usize> {
+    fn prefix_matches_optimistic(&self, digits: &[u8]) -> Option<(bool, usize)> {
         let count = self.count as usize;
         if digits.len() < count {
             return None;
@@ -794,7 +727,7 @@ impl<T> RawNode<T> {
                 return None;
             }
         }
-        Some(count)
+        Some((count <= PREFIX_LEN, count))
     }
 }
 
@@ -914,7 +847,7 @@ fn visit_leaf<T, F>(
         ix: usize,
         len: usize,
         node: &'a RawNode<()>,
-        _min: SmallVec<[u8; 32]>,
+        _min: SmallVec<[u8; 2]>,
         _marker: PhantomData<T>,
     }
 
@@ -970,7 +903,7 @@ fn visit_leaf<T, F>(
         None => {}
         Some(Ok(ref leaf)) => {
             if let Some(up) = rval {
-                if up <= leaf.key(){
+                if up <= leaf.key() {
                     return;
                 }
             }
@@ -1603,6 +1536,106 @@ mod node_variants {
                     lval,
                     rval,
                 );
+            }
+        }
+    }
+}
+
+mod bulkstore {
+    use super::*;
+    type DefaultArray<T> = [T; 8];
+
+    struct BulkStore<T> {
+        len: usize,
+        set: u64,
+        data: DefaultArray<T>,
+    }
+
+    impl<T> BulkStore<T> {
+        fn new() -> Self {
+            BulkStore {
+                len: 0,
+                set: 0,
+                data: unsafe { mem::uninitialized() },
+            }
+        }
+
+        fn contains(&self, it: *mut T) -> Option<usize> {
+            let it_us = it as usize;
+            unsafe {
+                let start = self.data.get_unchecked(0) as *const T;
+                let end = start.offset(self.data.len() as isize);
+                if it_us >= start as usize && it_us < end as usize {
+                    Some((it_us - start as usize) / mem::size_of::<T>())
+                } else {
+                    None
+                }
+            }
+        }
+
+        fn alloc(&mut self, it: T) -> *mut T {
+            match self.try_insert(it) {
+                Ok(ix) => unsafe { self.get_mut(ix) as *mut _ },
+                Err(it) => Box::into_raw(Box::new(it)),
+            }
+        }
+
+        fn try_insert(&mut self, it: T) -> Result<usize, T> {
+            debug_assert_eq!(self.set.count_ones() as usize, self.len);
+            if self.len == self.data.len() {
+                return Err(it);
+            }
+            let target = (!self.set).trailing_zeros() as usize;
+            unsafe { ptr::write(&mut self.data[target], it) };
+            self.set |= 1 << target;
+            self.len += 1;
+            debug_assert_eq!(self.set.count_ones() as usize, self.len);
+            Ok(target)
+        }
+
+        unsafe fn get(&self, ix: usize) -> &T {
+            debug_assert!(ix < self.len);
+            debug_assert!((1 << ix) & self.set != 0);
+            self.data.get_unchecked(ix)
+        }
+
+        unsafe fn get_mut(&mut self, ix: usize) -> &mut T {
+            debug_assert!(ix < self.len);
+            debug_assert!((1 << ix) & self.set != 0);
+            self.data.get_unchecked_mut(ix)
+        }
+
+        unsafe fn mark_removed(&mut self, ix: usize) {
+            // must be used in concert with manual deinitialization via get_mut()
+            debug_assert!((1 << ix) & self.set != 0);
+            self.set &= !(1 << ix);
+            self.len -= 1;
+        }
+    }
+
+    #[cfg(test)]
+    mod bulkstore_tests {
+        use super::*;
+
+        #[test]
+        fn test_bulkstore() {
+            unsafe {
+                let arr: DefaultArray<usize> = [0; 8];
+                let mut bs = BulkStore::new();
+                let mut v = Vec::new();
+                for i in 0..arr.len() {
+                    let a = bs.alloc(i);
+                    let a_ix = bs.contains(a);
+                    assert!(a_ix.is_some());
+                    v.push(a_ix.unwrap());
+                }
+
+                let b = bs.try_insert(15);
+                assert!(b.is_err());
+                let i1 = v[0];
+                bs.mark_removed(i1);
+                let b_ptr = bs.alloc(15);
+                assert_eq!(bs.contains(b_ptr).expect("B should be in the block"), i1);
             }
         }
     }
