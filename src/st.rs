@@ -46,6 +46,77 @@ impl<T: for<'a> Digital<'a> + PartialOrd> Element for ArtElement<T> {
     }
 }
 
+type DefaultArray<T> = [T; 8];
+
+struct BulkStore<T> {
+    len: usize,
+    set: u64,
+    data: DefaultArray<T>,
+}
+
+impl<T> BulkStore<T> {
+    fn new() -> Self {
+        BulkStore {
+            len: 0,
+            set: 0,
+            data: unsafe { mem::uninitialized() },
+        }
+    }
+
+    fn contains(&self, it: *mut T) -> bool {
+        let it_us = it as usize;
+        unsafe {
+            let start = self.data.get_unchecked(0) as *const T;
+            let end = start.offset(self.data.len() as isize);
+            it_us >= start as usize && it_us < end as usize
+        }
+    }
+
+    fn alloc(&mut self, it: T) -> *mut T {
+        match self.try_insert(it) {
+            Ok(ix) => unsafe { self.get_mut(ix) as *mut _ },
+            Err(it) => Box::into_raw(Box::new(it)),
+        }
+    }
+
+    fn try_insert(&mut self, it: T) -> Result<usize, T> {
+        debug_assert_eq!(self.set.count_ones() as usize, self.len);
+        if self.len == self.data.len() { return Err(it); }
+        let trailing = self.set.trailing_zeros();
+        let target = if trailing == 0 {
+            (!self.set).trailing_zeros()
+        } else {
+            trailing - 1
+        } as usize;
+        unsafe {
+            ptr::write(&mut self.data[target], it)
+        };
+        self.set |= 1 << target;
+        self.len += 1;
+        debug_assert_eq!(self.set.count_ones() as usize, self.len);
+        Ok(target)
+    }
+
+    unsafe fn get(&self, ix: usize) -> &T {
+        debug_assert!(ix < self.len);
+        debug_assert!((1 << ix) & self.set != 0);
+        self.data.get_unchecked(ix)
+    }
+
+    unsafe fn get_mut(&mut self, ix: usize) -> &mut T {
+        debug_assert!(ix < self.len);
+        debug_assert!((1 << ix) & self.set != 0);
+        self.data.get_unchecked_mut(ix)
+    }
+
+    unsafe fn mark_removed(&mut self, ix: usize) {
+        // must be used in concert with manual deinitialization via get_mut()
+        debug_assert!((1 << ix) & self.set != 0);
+        self.set &= !(1 << ix);
+        self.len -=1;
+    }
+}
+
 type RawMutRef<'a, T> = &'a mut RawNode<T>;
 type RawRef<'a, T> = &'a RawNode<T>;
 
