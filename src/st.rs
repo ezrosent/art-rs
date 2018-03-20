@@ -1,6 +1,11 @@
 //! Single-threaded radix tree implementation based on HyPer's ART
 extern crate smallvec;
-extern crate stdsimd;
+extern crate simd;
+
+#[cfg(target_arch = "x86")]
+use std::arch::x86::_mm_movemask_epi8;
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::_mm_movemask_epi8;
 
 use std::borrow::Borrow;
 use std::cmp;
@@ -10,12 +15,9 @@ use std::ptr;
 
 use self::node_variants::*;
 use self::smallvec::{Array, SmallVec};
-use self::stdsimd::vendor;
-use self::stdsimd::simd;
 use super::Digital;
 
 pub trait Element {
-    // TODO: use Borrow instead
     type Key: for<'a> Digital<'a> + PartialOrd;
     fn key(&self) -> &Self::Key;
     fn matches(&self, k: &Self::Key) -> bool;
@@ -1219,7 +1221,7 @@ mod node_variants {
                 let ks = simd::u8x16::load(&self.node.keys[..], 0);
                 let d_splat = simd::u8x16::splat(d);
                 let comps = d_splat.eq(ks);
-                let bits = unsafe { vendor::_mm_movemask_epi8(mem::transmute(comps)) } & mask;
+                let bits = unsafe { _mm_movemask_epi8(mem::transmute(comps)) } & mask;
                 return if bits == 0 {
                     None
                 } else {
@@ -1294,7 +1296,7 @@ mod node_variants {
                 let ks = simd::u8x16::load(&self.node.keys[..], 0);
                 let d_splat = simd::u8x16::splat(d);
                 let comps = d_splat.lt(ks);
-                let bits: i32 = vendor::_mm_movemask_epi8(mem::transmute(comps)) & mask;
+                let bits: i32 = _mm_movemask_epi8(mem::transmute(comps)) & mask;
                 let zeros = bits.trailing_zeros();
                 let target = if zeros == 32 {
                     self.children as usize

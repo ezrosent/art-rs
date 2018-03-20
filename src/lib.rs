@@ -1,5 +1,6 @@
 #![feature(swap_nonoverlapping)]
 #![feature(cfg_target_feature)]
+#![feature(stdsimd)]
 mod common;
 mod st;
 
