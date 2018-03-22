@@ -1,6 +1,7 @@
 //! Single-threaded radix tree implementation based on HyPer's ART
 extern crate simd;
 extern crate smallvec;
+extern crate fnv;
 
 #[cfg(target_arch = "x86")]
 use std::arch::x86::_mm_movemask_epi8;
@@ -51,9 +52,14 @@ impl<T: for<'a> Digital<'a> + PartialOrd> Element for ArtElement<T> {
 type RawMutRef<'a, T> = &'a mut RawNode<T>;
 type RawRef<'a, T> = &'a RawNode<T>;
 
+// TODO:
+//  - Add pointers to hashtable to both toplevel and trait-level insert and delete methods
+//  - Use these pointers to re-assign pointers upon growth and deletion
 pub struct RawART<T: Element> {
     len: usize,
     root: ChildPtr<T>,
+    prefix_target: usize,
+    buckets: Vec<*mut ChildPtr<T>>,
 }
 
 pub type ARTSet<T> = RawART<ArtElement<T>>;
@@ -179,14 +185,32 @@ macro_rules! with_node {
 
 impl<T: Element> RawART<T> {
     pub fn new() -> Self {
+        RawART::with_prefix_buckets(3, 4096)
+    }
+
+    pub fn with_prefix_buckets(prefix_len: usize, buckets: usize) -> Self {
         RawART {
             len: 0,
             root: ChildPtr::null(),
+            buckets: (0..buckets.next_power_of_two()).map(|_| ptr::null_mut()).collect::<Vec<_>>(),
+            prefix_target: prefix_len,
         }
     }
 
     pub fn len(&self) -> usize {
         self.len
+    }
+
+    fn hash_key(&self, digits: &[u8]) -> Option<u64> {
+        use self::fnv::FnvHasher;
+        use std::hash::Hasher;
+        if digits.len() < self.prefix_target {
+            None
+        } else {
+            let mut hasher = FnvHasher::default();
+            hasher.write(&digits[0..self.prefix_target]);
+            Some(hasher.finish())
+        }
     }
 
     // replace with NonNull
@@ -237,7 +261,14 @@ impl<T: Element> RawART<T> {
                 }
             }
         }
-        lookup_raw_recursive(&self.root, k, digits.as_slice(), true)
+        let (node_ref, slice) = if let Some(hash) = self.hash_key(digits.as_slice()) {
+            let ix = hash as usize & (self.buckets.len() - 1);
+            let ptr = self.buckets.get_unchecked(ix);
+            (&**ptr, &digits[0..self.prefix_target])
+        } else {
+            (&self.root, digits.as_slice())
+        };
+        lookup_raw_recursive(node_ref, k, slice, true)
     }
 
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
@@ -303,6 +334,7 @@ impl<T: Element> RawART<T> {
                     }
                 }
                 Err(inner_node) => {
+                    debug_assert_eq!(consumed, inner_node.consumed as usize);
                     let (matched, _) = inner_node.get_matching_prefix(
                         digits,
                         consumed,
@@ -344,12 +376,6 @@ impl<T: Element> RawART<T> {
     pub unsafe fn insert_raw(&mut self, elt: T) -> Result<(), T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(elt.key().digits());
-        // want to do something similar to lookup_raw_recursive.
-        // Need to keep track of:
-        // - current node
-        // - pointer to current node from parent
-        // - elt
-        // - digits
         unsafe fn insert_raw_recursive<T: Element>(
             curr: &mut ChildPtr<T>,
             mut e: T,
@@ -395,6 +421,7 @@ impl<T: Element> RawART<T> {
                     Branch::B1(leaf_digits, e)
                 }
                 Err(inner_node) => {
+                    debug_assert_eq!(consumed, inner_node.consumed as usize);
                     // found an interior node. need to continue the search!
                     let (matched, min_ref) = inner_node.get_matching_prefix(
                         &digits[..],
@@ -475,7 +502,8 @@ impl<T: Element> RawART<T> {
                         let common_prefix_digits = &digits[consumed..consumed + matched];
                         debug_assert_eq!(common_prefix_digits.len(), matched);
                         let n4: Box<RawNode<Node4<T>>> =
-                            make_node_with_prefix(&common_prefix_digits[..]);
+                            make_node_with_prefix(&common_prefix_digits[..], consumed as u32);
+                        inner_node.consumed += n4.count + 1;
                         debug_assert_eq!(n4.count as usize, common_prefix_digits.len());
                         consumed += n4.count as usize;
                         let by = matched + 1; // inner_node.count as usize - common_prefix_digits.len();
@@ -519,6 +547,7 @@ impl<T: Element> RawART<T> {
                     let n4: Box<RawNode<Node4<T>>> = make_node_from_common_prefix(
                         &leaf_digits.as_slice()[consumed..],
                         &digits[consumed..],
+                        consumed as u32,
                     );
                     let prefix_len = n4.count as usize;
                     let mut n4_raw = Box::into_raw(n4);
@@ -541,7 +570,14 @@ impl<T: Element> RawART<T> {
             }
             Ok(())
         }
-        let res = insert_raw_recursive(&mut self.root, elt, digits.as_slice(), 0);
+        let (node_ref, consumed) = if let Some(hash) = self.hash_key(digits.as_slice()) {
+            let ix = hash as usize & (self.buckets.len() - 1);
+            let ptr = self.buckets.get_unchecked(ix);
+            (&mut **ptr, self.prefix_target)
+        } else {
+            (&mut self.root, 0)
+        };
+        let res = insert_raw_recursive(node_ref, elt, digits.as_slice(), consumed);
         if res.is_ok() {
             self.len += 1;
         }
@@ -662,6 +698,7 @@ struct RawNode<Footer> {
     typ: NodeType,
     children: u16,
     count: u32,
+    consumed: u32,
     prefix: [u8; PREFIX_LEN],
     node: Footer,
 }
@@ -673,6 +710,7 @@ impl<T> RawNode<T> {
         }
         self.prefix[0] = d;
         self.count += 1;
+        self.consumed -= 1;
     }
 }
 
@@ -777,10 +815,11 @@ where
     }
 }
 
-fn make_node_with_prefix<T>(prefix: &[u8]) -> Box<RawNode<Node4<T>>> {
+fn make_node_with_prefix<T>(prefix: &[u8], consumed: u32) -> Box<RawNode<Node4<T>>> {
     let mut new_node = Box::new(RawNode {
         typ: NODE_4,
         children: 0,
+        consumed: consumed,
         count: prefix.len() as u32,
         prefix: [0; PREFIX_LEN],
         node: Node4 {
@@ -801,10 +840,10 @@ fn make_node_with_prefix<T>(prefix: &[u8]) -> Box<RawNode<Node4<T>>> {
     new_node
 }
 
-fn make_node_from_common_prefix<T>(d1: &[u8], d2: &[u8]) -> Box<RawNode<Node4<T>>> {
+fn make_node_from_common_prefix<T>(d1: &[u8], d2: &[u8], consumed: u32) -> Box<RawNode<Node4<T>>> {
     let mut common_prefix_digits = SmallVec::<[u8; 32]>::new();
     get_matching_prefix_slice(d1.iter(), d2.iter(), &mut common_prefix_digits);
-    make_node_with_prefix(&common_prefix_digits[..])
+    make_node_with_prefix(&common_prefix_digits[..], consumed)
 }
 
 struct Node4<T> {
@@ -1084,6 +1123,7 @@ mod node_variants {
                 let new_node = &mut *Box::into_raw(Box::new(RawNode {
                     typ: NODE_16,
                     children: self.children,
+                    consumed: self.consumed,
                     count: self.count,
                     prefix: self.prefix,
                     node: Node16 {
@@ -1205,6 +1245,7 @@ mod node_variants {
                     typ: NODE_48,
                     children: 16,
                     count: self.count,
+                    consumed: self.consumed,
                     prefix: self.prefix,
                     node: Node48 {
                         keys: [0; 256],
@@ -1379,6 +1420,7 @@ mod node_variants {
                     typ: NODE_256,
                     children: 48,
                     count: self.count,
+                    consumed: self.consumed,
                     prefix: self.prefix,
                     node: Node256 {
                         ptrs: mem::transmute::<[usize; 256], [ChildPtr<T>; 256]>([0 as usize; 256]),

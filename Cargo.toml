@@ -7,6 +7,7 @@ authors = ["eli"]
 byteorder = "1.2.1"
 simd = "0.2.1"
 smallvec = "0.6.0"
+fnv = "1.0.3"
 
 [dev-dependencies]
 quickcheck = "0.6.1"
