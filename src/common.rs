@@ -1,8 +1,6 @@
-extern crate byteorder;
-
 use std::iter::Iterator;
 use std::str;
-use self::byteorder::{BigEndian, ByteOrder};
+use super::byteorder::{BigEndian, ByteOrder};
 
 /// `Digital` describes types that can be expressed as sequences of bytes.
 ///

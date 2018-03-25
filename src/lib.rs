@@ -3,6 +3,7 @@
 #![feature(stdsimd)]
 mod common;
 mod st;
+extern crate byteorder;
 
 pub use common::Digital;
 pub use st::*;
