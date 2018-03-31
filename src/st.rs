@@ -18,7 +18,7 @@ use std::ptr;
 use self::node_variants::*;
 use self::smallvec::{Array, SmallVec};
 use super::Digital;
-use super::byteorder::{ByteOrder, BigEndian};
+use super::byteorder::{BigEndian, ByteOrder};
 
 pub trait Element {
     type Key: for<'a> Digital<'a> + PartialOrd;
@@ -64,7 +64,7 @@ pub struct RawART<T: Element> {
     buckets: Buckets<T>,
 }
 
-struct Buckets<T>{
+struct Buckets<T> {
     data: Vec<(u64, MarkedPtr<T>)>,
     misses: UnsafeCell<usize>,
     hits: UnsafeCell<usize>,
@@ -78,15 +78,21 @@ impl<T> Drop for Buckets<T> {
             let h = *self.hits.get();
             let m = *self.misses.get();
             let c = *self.collisions.get();
-            eprintln!("hits={:?} miss={:?} collisions={:?} hit rate={:?} len={:?}",
-                      h, m, c, h as f64 / (h + m + c) as f64, self.len);
+            eprintln!(
+                "hits={:?} miss={:?} collisions={:?} hit rate={:?} len={:?}",
+                h,
+                m,
+                c,
+                h as f64 / (h + m + c) as f64,
+                self.len
+            );
         }
     }
 }
 
 impl<T> Buckets<T> {
     fn new(size: usize) -> Self {
-        Buckets{
+        Buckets {
             data: (0..size.next_power_of_two())
                 .map(|_| (0, MarkedPtr::null()))
                 .collect::<Vec<_>>(),
@@ -127,14 +133,15 @@ impl<T> Buckets<T> {
         use self::fnv::FnvHasher;
         use std::hash::Hasher;
         let mut hasher = FnvHasher::default();
-        hasher.write(bs);
+        let mut u = Self::read_u64(bs);
+        u ^= u >> 33;
+        u = u.wrapping_mul(18397679294719823053);
+        u ^= u >> 33;
+        u = u.wrapping_mul(14181476777654086739);
+        u ^= u >> 33;
+        hasher.write_u64(u);
         hasher.finish() as usize & (self.data.len() - 1)
-        // let mut u = Self::read_u64(bs);
-        // u ^= u >> 33;
-        // u = u.wrapping_mul(18397679294719823053);
-        // u ^= u >> 33;
-        // u = u.wrapping_mul(14181476777654086739);
-        // u ^= u >> 33;
+
         // u as usize & (self.data.len() - 1)
     }
 
@@ -284,7 +291,7 @@ enum InsertResult<T> {
 
 impl<T: Element> RawART<T> {
     pub fn new() -> Self {
-        RawART::with_prefix_buckets(4, 1 << 20)
+        RawART::with_prefix_buckets(3, 256 * 256)
     }
 
     pub fn with_prefix_buckets(prefix_len: usize, buckets: usize) -> Self {
@@ -331,9 +338,13 @@ impl<T: Element> RawART<T> {
                 }
                 Some(Err(inner_node)) => {
                     consumed = (*inner_node).consumed as usize;
+                    if consumed >= digits.len() {
+                        return None;
+                    }
                     // handle prefixes now
-                    (*inner_node).prefix_matches_optimistic(&digits[consumed..]).and_then(
-                        |(dont_check_new, con)| {
+                    (*inner_node)
+                        .prefix_matches_optimistic(&digits[consumed..])
+                        .and_then(|(dont_check_new, con)| {
                             consumed += con;
                             // let new_digits = &digits[consumed..];
                             if digits.len() == consumed {
@@ -352,8 +363,7 @@ impl<T: Element> RawART<T> {
                                     )
                                 })
                             })
-                        },
-                    )
+                        })
                 }
             }
         }
@@ -367,10 +377,7 @@ impl<T: Element> RawART<T> {
     }
 
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
-        // XXX There's a rare bug here:
-        // "
-        // thread 'st::tests::string_set_behavior' panicked at 'Deletion failed immediately for ["en\u{16}P{" : [102, 111, 23, 81, 124, 0]]', src/st.rs:1888:13
-        // "
+        // XXX There is currently a bug where we aren't deleting all relevant prefix nodes
 
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
@@ -389,7 +396,7 @@ impl<T: Element> RawART<T> {
             }
             unsafe fn move_val_out<T>(mut cptr: ChildPtr<T>) -> T {
                 let res = {
-                    // first we read the memory out 
+                    // first we read the memory out
                     let r = cptr.get_mut().unwrap().unwrap();
                     ptr::read(r)
                 };
@@ -579,7 +586,13 @@ impl<T: Element> RawART<T> {
                 }
                 Err(inn) => {
                     let inner_node = &mut *inn;
-                    debug_assert_eq!(consumed, inner_node.consumed as usize);
+                    #[cfg(debug_assertions)]
+                    {
+                        if pptr.is_some() {
+                            debug_assert_eq!(consumed, inner_node.consumed as usize);
+                        }
+                    }
+                    consumed = inner_node.consumed as usize;
                     // found an interior node. need to continue the search!
                     let (matched, min_ref) = inner_node.get_matching_prefix(
                         &digits[..],
@@ -627,7 +640,9 @@ impl<T: Element> RawART<T> {
                             let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                             let _r = nod.insert(d, c_ptr, pptr);
                             debug_assert!(_r.is_ok());
-                            if full && nod.consumed as usize <= target && target <= nod.consumed as usize + nod.count as usize {
+                            if full && nod.consumed as usize <= target
+                                && target <= nod.consumed as usize + nod.count as usize
+                            {
                                 buckets.insert(&digits[0..target], (*pptr.unwrap()).to_marked());
                             }
                             return Success;
@@ -1872,7 +1887,11 @@ mod tests {
         let mut v1 = random_vec(!0, 1 << 18);
         for item in v1.iter() {
             s.add(*item);
-            assert!(s.contains(item), "lookup failed immediately for {:?}", DebugVal(*item));
+            assert!(
+                s.contains(item),
+                "lookup failed immediately for {:?}",
+                DebugVal(*item)
+            );
         }
         let mut missing = Vec::new();
         for item in v1.iter() {
@@ -1915,7 +1934,11 @@ mod tests {
         }
         assert!(!failed);
         for i in v1.iter() {
-            assert!(s.contains(i), "Didn't delete {:?}, but it is gone!", DebugVal(*i));
+            assert!(
+                s.contains(i),
+                "Didn't delete {:?}, but it is gone!",
+                DebugVal(*i)
+            );
         }
     }
 

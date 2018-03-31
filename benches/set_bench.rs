@@ -81,11 +81,7 @@ fn random_string_vec(max_len: usize, len: usize) -> Vec<String> {
         .collect()
 }
 
-fn bench_set_rand_int_lookup<S: Set<u64>>(
-    b: &mut Bencher,
-    contents: &S,
-    lookups: &Vec<u64>,
-) {
+fn bench_set_rand_int_lookup<S: Set<u64>>(b: &mut Bencher, contents: &S, lookups: &Vec<u64>) {
     assert!(lookups.len().is_power_of_two());
     let mut ix = 0;
     b.iter(|| {
@@ -185,7 +181,6 @@ fn bench_set_rand_int_insert_remove<S: Set<u64>>(
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-
     use std::fmt::{Debug, Error, Formatter};
     #[derive(Clone)]
     struct SizeVec(Vec<u64>, Vec<u64>);
@@ -229,27 +224,35 @@ fn criterion_benchmark(c: &mut Criterion) {
                 write!(f, "{:?}", self.0)
             }
         }
-        let sets1 = inp.iter().map(|sv| {
-            let mut s = S::new();
-            for i in sv.0.iter() {
-                s.insert(*i);
-            }
-            Wrap(sv.clone(), Box::new(s))
-        }).collect::<Vec<Wrap<_>>>();
-        c.bench_function_over_inputs(&format!("{}/lookup_hit", desc), |b, &Wrap(ref sv, ref s)| {
-            bench_set_rand_int_lookup::<S>(b, &*s, &sv.0)
-        }, sets1);
+        let sets1 = inp.iter()
+            .map(|sv| {
+                let mut s = S::new();
+                for i in sv.0.iter() {
+                    s.insert(*i);
+                }
+                Wrap(sv.clone(), Box::new(s))
+            })
+            .collect::<Vec<Wrap<_>>>();
+        c.bench_function_over_inputs(
+            &format!("{}/lookup_hit", desc),
+            |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<S>(b, &*s, &sv.0),
+            sets1,
+        );
         eprintln!("Generating for {} (2/2)", desc);
-        let sets2 = inp.iter().map(|sv| {
-            let mut s = S::new();
-            for i in sv.0.iter() {
-                s.insert(*i);
-            }
-            Wrap(sv.clone(), Box::new(s))
-        }).collect::<Vec<Wrap<_>>>();
-        c.bench_function_over_inputs(&format!("{}/lookup_miss", desc), |b, &Wrap(ref sv, ref s)| {
-            bench_set_rand_int_lookup::<S>(b, &*s, &sv.1)
-        }, sets2);
+        let sets2 = inp.iter()
+            .map(|sv| {
+                let mut s = S::new();
+                for i in sv.0.iter() {
+                    s.insert(*i);
+                }
+                Wrap(sv.clone(), Box::new(s))
+            })
+            .collect::<Vec<Wrap<_>>>();
+        c.bench_function_over_inputs(
+            &format!("{}/lookup_miss", desc),
+            |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<S>(b, &*s, &sv.1),
+            sets2,
+        );
         c.bench_functions(desc, make_fns::<S>(), ());
     }
     make_bench::<HashSet<u64>>(c, "Hashtable", &v1s);
