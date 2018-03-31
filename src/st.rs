@@ -9,6 +9,7 @@ use std::arch::x86::_mm_movemask_epi8;
 use std::arch::x86_64::_mm_movemask_epi8;
 
 use std::borrow::Borrow;
+use std::cell::UnsafeCell;
 use std::cmp;
 use std::marker::PhantomData;
 use std::mem;
@@ -17,7 +18,7 @@ use std::ptr;
 use self::node_variants::*;
 use self::smallvec::{Array, SmallVec};
 use super::Digital;
-use super::byteorder::{ByteOrder, LittleEndian};
+use super::byteorder::{ByteOrder, BigEndian};
 
 pub trait Element {
     type Key: for<'a> Digital<'a> + PartialOrd;
@@ -63,32 +64,52 @@ pub struct RawART<T: Element> {
     buckets: Buckets<T>,
 }
 
-struct Buckets<T>(Vec<(u64, MarkedPtr<T>)>);
+struct Buckets<T>{
+    data: Vec<(u64, MarkedPtr<T>)>,
+    misses: UnsafeCell<usize>,
+    hits: UnsafeCell<usize>,
+    collisions: UnsafeCell<usize>,
+    len: usize,
+}
+
+impl<T> Drop for Buckets<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let h = *self.hits.get();
+            let m = *self.misses.get();
+            let c = *self.collisions.get();
+            eprintln!("hits={:?} miss={:?} collisions={:?} hit rate={:?} len={:?}",
+                      h, m, c, h as f64 / (h + m + c) as f64, self.len);
+        }
+    }
+}
 
 impl<T> Buckets<T> {
     fn new(size: usize) -> Self {
-        Buckets(
-            (0..size.next_power_of_two())
+        Buckets{
+            data: (0..size.next_power_of_two())
                 .map(|_| (0, MarkedPtr::null()))
                 .collect::<Vec<_>>(),
-        )
+            misses: UnsafeCell::new(0),
+            hits: UnsafeCell::new(0),
+            collisions: UnsafeCell::new(0),
+            len: 0,
+        }
     }
 
     fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>> {
-        use self::fnv::FnvHasher;
-        use std::hash::Hasher;
-        let mut hasher = FnvHasher::default();
-        hasher.write(bs);
-        debug_assert!(self.0.len().is_power_of_two());
-        let key = hasher.finish() as usize & (self.0.len() - 1);
-        let (i, ptr) = unsafe { self.0.get_unchecked(key) }.clone();
+        let key = self.get_index(bs);
+        let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
         if ptr.is_null() {
+            unsafe { *self.misses.get() += 1 };
             None
         } else {
             let key = Self::read_u64(bs);
             if key == i {
+                unsafe { *self.hits.get() += 1 };
                 Some(ptr)
             } else {
+                unsafe { *self.collisions.get() += 1 };
                 None
             }
         }
@@ -98,18 +119,32 @@ impl<T> Buckets<T> {
         debug_assert!(bs.len() <= 8);
         let mut arr = [0 as u8; 8];
         unsafe { ptr::copy_nonoverlapping(&bs[0], &mut arr[0], cmp::min(bs.len(), 8)) };
-        LittleEndian::read_u64(&arr[..])
+        BigEndian::read_u64(&arr[..])
     }
 
-    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
+    fn get_index(&self, bs: &[u8]) -> usize {
+        debug_assert!(self.data.len().is_power_of_two());
         use self::fnv::FnvHasher;
         use std::hash::Hasher;
         let mut hasher = FnvHasher::default();
         hasher.write(bs);
-        debug_assert!(self.0.len().is_power_of_two());
-        let h = hasher.finish() as usize & (self.0.len() - 1);
+        hasher.finish() as usize & (self.data.len() - 1)
+        // let mut u = Self::read_u64(bs);
+        // u ^= u >> 33;
+        // u = u.wrapping_mul(18397679294719823053);
+        // u ^= u >> 33;
+        // u = u.wrapping_mul(14181476777654086739);
+        // u ^= u >> 33;
+        // u as usize & (self.data.len() - 1)
+    }
+
+    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
+        let h = self.get_index(bs);
         let key = Self::read_u64(bs);
-        unsafe { *self.0.get_unchecked_mut(h) = (key, ptr) };
+        if unsafe { self.data.get_unchecked(h).1.is_null() } {
+            self.len += 1;
+        }
+        unsafe { *self.data.get_unchecked_mut(h) = (key, ptr) };
     }
 }
 
@@ -209,7 +244,7 @@ macro_rules! with_node_inner {
                 let $nod = unsafe { mem::transmute::<$r<_>, $r<Node256<$ty>>>(_b) };
                 $body
             }
-            _ => unreachable!(),
+            _ => panic!("Found unrecognized node type {:?}", _b.typ),
         }
     }};
 }
@@ -249,7 +284,7 @@ enum InsertResult<T> {
 
 impl<T: Element> RawART<T> {
     pub fn new() -> Self {
-        RawART::with_prefix_buckets(4, 8192)
+        RawART::with_prefix_buckets(4, 1 << 20)
     }
 
     pub fn with_prefix_buckets(prefix_len: usize, buckets: usize) -> Self {
@@ -282,33 +317,37 @@ impl<T: Element> RawART<T> {
             curr: MarkedPtr<T>,
             k: &T::Key,
             digits: &[u8],
+            mut consumed: usize,
             dont_check: bool,
         ) -> Option<*mut T> {
             match curr.get_raw() {
                 None => None,
                 Some(Ok(leaf_node)) => {
-                    if (dont_check && digits.len() == 0) || (*leaf_node).matches(k) {
+                    if (dont_check && digits.len() == consumed) || (*leaf_node).matches(k) {
                         Some(leaf_node)
                     } else {
                         None
                     }
                 }
                 Some(Err(inner_node)) => {
+                    consumed = (*inner_node).consumed as usize;
                     // handle prefixes now
-                    (*inner_node).prefix_matches_optimistic(digits).and_then(
-                        |(dont_check_new, consumed)| {
-                            let new_digits = &digits[consumed..];
-                            if new_digits.len() == 0 {
+                    (*inner_node).prefix_matches_optimistic(&digits[consumed..]).and_then(
+                        |(dont_check_new, con)| {
+                            consumed += con;
+                            // let new_digits = &digits[consumed..];
+                            if digits.len() == consumed {
                                 // Our digits were entirely consumed, but this is a non-leaf node.
                                 // That means our node is not present.
                                 return None;
                             }
                             with_node!(&*inner_node, nod, {
-                                nod.find_raw(new_digits[0]).and_then(|next_node| {
+                                nod.find_raw(digits[consumed]).and_then(|next_node| {
                                     lookup_raw_recursive(
                                         (&*next_node).to_marked(),
                                         k,
-                                        &new_digits[1..],
+                                        digits,
+                                        consumed + 1,
                                         dont_check && dont_check_new,
                                     )
                                 })
@@ -319,12 +358,12 @@ impl<T: Element> RawART<T> {
             }
         }
 
-        let (node_ref, slice) = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
-            (ptr, &digits[self.prefix_target..])
+        let node_ref = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+            ptr
         } else {
-            (self.root.to_marked(), digits.as_slice())
+            self.root.to_marked()
         };
-        lookup_raw_recursive(node_ref, k, slice, true)
+        lookup_raw_recursive(node_ref, k, digits.as_slice(), 0, true)
     }
 
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
@@ -350,10 +389,17 @@ impl<T: Element> RawART<T> {
             }
             unsafe fn move_val_out<T>(mut cptr: ChildPtr<T>) -> T {
                 let res = {
+                    // first we read the memory out 
                     let r = cptr.get_mut().unwrap().unwrap();
                     ptr::read(r)
                 };
-                mem::forget(cptr);
+                // Now we want to deallocate the memory that once held the element, but we don't
+                // want to run its destructor if it has one.
+                //
+                // XXX There must be a better way to do this. Call deallocate directly?
+                use std::mem::ManuallyDrop;
+                let cptr2 = mem::transmute::<ChildPtr<T>, ChildPtr<ManuallyDrop<T>>>(cptr);
+                mem::drop(cptr2);
                 res
             }
 
@@ -390,7 +436,7 @@ impl<T: Element> RawART<T> {
                                 // need to add d as a prefix to c_ptr
                                 *parent_ref = c_ptr;
                                 if switch {
-                                    buckets.insert(&digits[0..consumed], parent_ref.to_marked());
+                                    buckets.insert(&digits[0..target], parent_ref.to_marked());
                                     debug_assert!(parent_ref.get().unwrap().is_err());
                                 }
                             }
@@ -513,8 +559,8 @@ impl<T: Element> RawART<T> {
                     let mut leaf_ptr = ChildPtr::from_node(n4_raw);
                     let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                     mem::swap(&mut *pp, &mut leaf_ptr);
-                    if consumed <= target && target < consumed + (*n4_raw).count as usize {
-                        buckets.insert(&digits[0..consumed], (*pp).to_marked());
+                    if consumed <= target && target <= consumed + (*n4_raw).count as usize {
+                        buckets.insert(&digits[0..target], (*pp).to_marked());
                         debug_assert!((*pp).get().unwrap().is_err());
                     }
                     // n4_raw has now replaced the leaf, we need to reinsert the leaf, along with
@@ -574,12 +620,16 @@ impl<T: Element> RawART<T> {
                                     target,
                                 );
                             }
-                            if nod.is_full() && pptr.is_none() {
+                            let full = nod.is_full();
+                            if full && pptr.is_none() {
                                 return Failure(e);
                             }
                             let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                             let _r = nod.insert(d, c_ptr, pptr);
                             debug_assert!(_r.is_ok());
+                            if full && nod.consumed as usize <= target && target <= nod.consumed as usize + nod.count as usize {
+                                buckets.insert(&digits[0..target], (*pptr.unwrap()).to_marked());
+                            }
                             return Success;
                         });
                     } else {
@@ -639,7 +689,7 @@ impl<T: Element> RawART<T> {
                         let pp = pptr.unwrap();
                         let mut n4_cptr = ChildPtr::from_node(n4_raw);
                         mem::swap(&mut *pp, &mut n4_cptr);
-                        if (*n4_raw).consumed as usize == target {
+                        if consumed <= target && target <= consumed + (*n4_raw).count as usize {
                             buckets.insert(&digits[0..target], (*pp).to_marked());
                             debug_assert!((*pp).get().unwrap().is_err());
                         }
@@ -676,7 +726,7 @@ impl<T: Element> RawART<T> {
                 }
             }
         };
-        // Hash-indexed inserts can fail, because we don't have access to a parent pointer.
+        // Hash-indexed inserts can fail, retry a default root-based traversal.
         let root_alias = Some(&mut self.root as *mut _);
         match insert_raw_recursive(
             self.root.to_marked(),
@@ -697,8 +747,6 @@ impl<T: Element> RawART<T> {
     }
 }
 
-// may want to get the algorithmics right first. Just assume you're storing usize and have
-// Either<Leaf, Option<Box<Node...>>> as the child pointers.
 // TODO: use NonNull everywhere
 
 struct MarkedPtr<T>(usize, PhantomData<T>);
@@ -935,11 +983,6 @@ enum DeleteResult<T> {
 
 trait Node<T: Element>: Sized {
     // insert assumes that 'd' is not present in the node. This is enforced in debug buids
-    /// TODO: pptr becomes an option, insert returns Result
-    ///       IRR can take two pointers as well?
-    ///       using this pattern helps us avoid missing things areas
-    ///
-    ///       insert returns a Result<(),ChildPtr<T>>
     unsafe fn insert(
         &mut self,
         d: u8,
@@ -1086,23 +1129,6 @@ fn visit_leaf<T, F>(
                 return Some(res);
             }
             None
-            // TODO: for now, we don't do the implicit prefix and rely on the check at the end to
-            // filter out any false positives.
-            //
-            // if self.ix == PREFIX_LEN && self.min.len() == 0 {
-            //     self.min.extend(
-            //         with_node!(self.node, node, node.get_min(), T)
-            //             .unwrap()
-            //             .key()
-            //             .digits(),
-            //     );
-            // }
-
-            // //XXX: this is wrong, isn't it? Need to find out _where_ it is in min.
-            // //Which means we have to pass consumed through for_each. Oh well.
-            // let res = self.min[self.ix];
-            // self.ix += 1;
-            // Some(res)
         }
     }
     match unsafe { c.get() } {
@@ -1846,7 +1872,7 @@ mod tests {
         let mut v1 = random_vec(!0, 1 << 18);
         for item in v1.iter() {
             s.add(*item);
-            assert!(s.contains(item));
+            assert!(s.contains(item), "lookup failed immediately for {:?}", DebugVal(*item));
         }
         let mut missing = Vec::new();
         for item in v1.iter() {
@@ -1889,7 +1915,7 @@ mod tests {
         }
         assert!(!failed);
         for i in v1.iter() {
-            assert!(s.contains(i), "Didn't delete {:?}, but it is gone!", *i);
+            assert!(s.contains(i), "Didn't delete {:?}, but it is gone!", DebugVal(*i));
         }
     }
 
