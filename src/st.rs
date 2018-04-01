@@ -103,6 +103,14 @@ impl<T> Buckets<T> {
         }
     }
 
+    // fn remove(&mut self, bs: &[u8]) {
+    //     let key = self.get_index(bs);
+    //     let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
+    //     let num = Self::read_u64(bs);
+    //     if num == i {
+
+    // }
+
     fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>> {
         let key = self.get_index(bs);
         let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
@@ -116,6 +124,7 @@ impl<T> Buckets<T> {
                 Some(ptr)
             } else {
                 unsafe { *self.collisions.get() += 1 };
+                // eprintln!("{:?} collided with {:?}", Self::read_u64(bs), i);
                 None
             }
         }
@@ -309,7 +318,7 @@ impl<T: Element> RawART<T> {
     }
 
     fn hash_lookup(&self, digits: &[u8]) -> Option<MarkedPtr<T>> {
-        if digits.len() < self.prefix_target {
+        if digits.len() <= self.prefix_target {
             None
         } else {
             self.buckets.lookup(&digits[0..self.prefix_target])
@@ -369,6 +378,8 @@ impl<T: Element> RawART<T> {
         }
 
         let node_ref = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+            let _kint = *(k as *const _ as *const u64);
+            // eprintln!("hash lookup on {}", _kint);
             ptr
         } else {
             self.root.to_marked()
@@ -422,7 +433,6 @@ impl<T: Element> RawART<T> {
                                 {
                                     match node.delete(d) {
                                         DeleteResult::Success(deleted) => {
-                                            // TODO: free up space here
                                             (Some(move_val_out(deleted)), None)
                                         }
                                         DeleteResult::Singleton { deleted, orphan } => {
@@ -433,23 +443,50 @@ impl<T: Element> RawART<T> {
                                 }
                             );
                             if let Some(mut c_ptr) = asgn {
+                                // we are promoting an "orphan" so we must increase its prefix
+                                // length
                                 let mut switch = false;
-                                if let Err(inner) = c_ptr.get_mut().unwrap() {
-                                    inner.append_prefix(d);
-                                    if inner.consumed as usize == target {
-                                        switch = true;
+                                let mut replace = false;
+                                {
+                                    let pp = parent_ref.get_mut().unwrap().err().unwrap();
+                                    if pp.consumed as usize <= target
+                                        && target <= pp.consumed as usize + pp.count as usize
+                                    {
+                                        replace = true;
+                                    }
+                                    if let Err(inner) = c_ptr.get_mut().unwrap() {
+                                        let parent_count = pp.count;
+                                        let mut prefix_digits =
+                                            SmallVec::<[u8; PREFIX_LEN + 1]>::new();
+                                        for dd in &pp.prefix
+                                            [..cmp::min(parent_count as usize, PREFIX_LEN)]
+                                        {
+                                            prefix_digits.push(*dd);
+                                        }
+                                        prefix_digits.push(d);
+                                        inner.append_prefix(
+                                            prefix_digits.as_slice(),
+                                            parent_count + 1,
+                                        );
+                                        debug_assert_eq!(inner.consumed, pp.consumed);
+                                        if inner.consumed as usize <= target
+                                            && target
+                                                <= inner.consumed as usize + inner.count as usize
+                                        {
+                                            switch = true;
+                                        }
                                     }
                                 }
-                                // need to add d as a prefix to c_ptr
                                 *parent_ref = c_ptr;
                                 if switch {
-                                    buckets.insert(&digits[0..target], parent_ref.to_marked());
+                                    buckets.insert(&digits[0..target], (*parent_ref).to_marked());
                                     debug_assert!(parent_ref.get().unwrap().is_err());
+                                } else if replace {
+                                    buckets.insert(&digits[0..target], MarkedPtr::null());
                                 }
                             }
                             return res;
                         } else {
-                            // This is the root, we'll set it to null below.
                             None
                         }
                     } else {
@@ -493,6 +530,7 @@ impl<T: Element> RawART<T> {
             } else {
                 // we are in the root, set curr to null.
                 let c_ptr = curr.swap_null();
+                buckets.insert(&digits[0..target], MarkedPtr::null());
                 Some(move_val_out(c_ptr))
             }
         }
@@ -508,6 +546,9 @@ impl<T: Element> RawART<T> {
         if res.is_some() {
             debug_assert!(self.len > 0);
             self.len -= 1;
+            // Note that this is overly conservative, but will suffice for now.
+            // self.buckets
+            //     .insert(&digits[..self.prefix_target], MarkedPtr::null());
         }
         res
     }
@@ -922,13 +963,18 @@ struct RawNode<Footer> {
 }
 
 impl<T> RawNode<T> {
-    fn append_prefix(&mut self, d: u8) {
+    fn append_prefix(&mut self, d: &[u8], total_count: u32) {
+        debug_assert!(d.len() <= PREFIX_LEN);
         unsafe {
-            ptr::copy(&self.prefix[0], &mut self.prefix[1], PREFIX_LEN - 1);
+            ptr::copy(
+                &self.prefix[0],
+                &mut self.prefix[d.len()],
+                PREFIX_LEN - d.len(),
+            );
+            ptr::copy(&d[0], &mut self.prefix[0], d.len());
         }
-        self.prefix[0] = d;
-        self.count += 1;
-        self.consumed -= 1;
+        self.count += total_count;
+        self.consumed -= total_count;
     }
 }
 
