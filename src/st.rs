@@ -103,14 +103,6 @@ impl<T> Buckets<T> {
         }
     }
 
-    // fn remove(&mut self, bs: &[u8]) {
-    //     let key = self.get_index(bs);
-    //     let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
-    //     let num = Self::read_u64(bs);
-    //     if num == i {
-
-    // }
-
     fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>> {
         let key = self.get_index(bs);
         let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
@@ -150,8 +142,6 @@ impl<T> Buckets<T> {
         u ^= u >> 33;
         hasher.write_u64(u);
         hasher.finish() as usize & (self.data.len() - 1)
-
-        // u as usize & (self.data.len() - 1)
     }
 
     fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
@@ -294,7 +284,7 @@ enum InsertResult<T> {
 //   need to insert node into hash table. This can be done by passing a
 //   reference to the function. [check]
 // 3 For removals, any place that removes an interior node (basically
-//   the case when an orphan is returned) check the old nodes `consumed`
+//   the case when a last is returned) check the old nodes `consumed`
 //   value and remove it from the table if necessary. [half-done]
 // 4 Clean this shit up!
 
@@ -388,8 +378,10 @@ impl<T: Element> RawART<T> {
     }
 
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
-        // XXX There is currently a bug where we aren't deleting all relevant prefix nodes
-
+        // TODO emit log on failure with which branch failed
+        // fn emit_fail_log_int<T>...
+        // Also, consider hypothesis that promoting last doesn't work, and is leading to failed
+        // lookups
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
         unsafe fn delete_raw_recursive<T: Element>(
@@ -435,24 +427,37 @@ impl<T: Element> RawART<T> {
                                         DeleteResult::Success(deleted) => {
                                             (Some(move_val_out(deleted)), None)
                                         }
-                                        DeleteResult::Singleton { deleted, orphan } => {
-                                            (Some(move_val_out(deleted)), Some(orphan))
+                                        DeleteResult::Singleton { deleted, last, last_d } => {
+                                            debug_assert!(deleted.get().unwrap().is_ok());
+                                            (Some(move_val_out(deleted)), Some((last, last_d)))
                                         }
                                         DeleteResult::Failure => unreachable!(),
                                     }
                                 }
                             );
-                            if let Some(mut c_ptr) = asgn {
-                                // we are promoting an "orphan" so we must increase its prefix
+                            if let Some((mut c_ptr, last_d)) = asgn {
+                                // we are promoting a "last" so we must increase its prefix
                                 // length
                                 let mut switch = false;
                                 let mut replace = false;
+                                let mut ds = SmallVec::<[u8; 8]>::new();
                                 {
                                     let pp = parent_ref.get_mut().unwrap().err().unwrap();
                                     if pp.consumed as usize <= target
                                         && target <= pp.consumed as usize + pp.count as usize
                                     {
+                                        // We want to construct enough context to clear out the
+                                        // cache below. Because digits[..] may be too short to fill
+                                        // the hash prefix cache, we need to fill in additional
+                                        // context from the interior nodes.
+                                        //
+                                        // In this case, we start the work by filling in the prefix
+                                        // not present in 'pp'. Below we do the same for `inner` in
+                                        // case it replaces 'pp'.
                                         replace = true;
+                                        for dd in &digits[..pp.consumed as usize] {
+                                            ds.push(*dd)
+                                        }
                                     }
                                     if let Err(inner) = c_ptr.get_mut().unwrap() {
                                         let parent_count = pp.count;
@@ -463,10 +468,10 @@ impl<T: Element> RawART<T> {
                                         {
                                             prefix_digits.push(*dd);
                                         }
-                                        prefix_digits.push(d);
+                                        prefix_digits.push(last_d);
                                         inner.append_prefix(
                                             prefix_digits.as_slice(),
-                                            parent_count + 1,
+                                            prefix_digits.len() as u32,
                                         );
                                         debug_assert_eq!(inner.consumed, pp.consumed);
                                         if inner.consumed as usize <= target
@@ -474,15 +479,34 @@ impl<T: Element> RawART<T> {
                                                 <= inner.consumed as usize + inner.count as usize
                                         {
                                             switch = true;
+                                            if !replace {
+                                                for dd in &digits[..pp.consumed as usize] {
+                                                    ds.push(*dd);
+                                                }
+                                            }
+                                            for dd in &inner.prefix[..cmp::min(inner.count as usize, PREFIX_LEN)] {
+                                                ds.push(*dd);
+                                            }
+                                        }
+                                    }
+                                    if replace &&  !switch {
+                                        for dd in &pp.prefix[..cmp::min(pp.count as usize, PREFIX_LEN)] {
+                                            ds.push(*dd);
                                         }
                                     }
                                 }
-                                *parent_ref = c_ptr;
+                                mem::swap(parent_ref, &mut c_ptr);
+                                let mut d_slice = &digits[..];
+                                if digits.len() < target && (switch || replace) {
+                                    debug_assert!(target <= 8);
+                                    // need to construct new digits
+                                    d_slice = ds.as_slice();
+                                } 
                                 if switch {
-                                    buckets.insert(&digits[0..target], (*parent_ref).to_marked());
+                                    buckets.insert(&d_slice[0..target], (*parent_ref).to_marked());
                                     debug_assert!(parent_ref.get().unwrap().is_err());
                                 } else if replace {
-                                    buckets.insert(&digits[0..target], MarkedPtr::null());
+                                    buckets.insert(&d_slice[0..target], MarkedPtr::null());
                                 }
                             }
                             return res;
@@ -546,9 +570,6 @@ impl<T: Element> RawART<T> {
         if res.is_some() {
             debug_assert!(self.len > 0);
             self.len -= 1;
-            // Note that this is overly conservative, but will suffice for now.
-            // self.buckets
-            //     .insert(&digits[..self.prefix_target], MarkedPtr::null());
         }
         res
     }
@@ -1038,7 +1059,8 @@ enum DeleteResult<T> {
     Success(ChildPtr<T>),
     Singleton {
         deleted: ChildPtr<T>,
-        orphan: ChildPtr<T>,
+        last: ChildPtr<T>,
+        last_d: u8,
     },
 }
 
@@ -1288,7 +1310,8 @@ mod node_variants {
                         mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
                         DeleteResult::Singleton {
                             deleted: deleted,
-                            orphan: c_ptr,
+                            last: c_ptr,
+                            last_d: $slf.node.keys[0],
                         }
                     } else {
                         DeleteResult::Success(deleted)
@@ -1689,7 +1712,8 @@ mod node_variants {
                         self.node.keys[ix] = 0; // not really necessary
                         DeleteResult::Singleton {
                             deleted: deleted,
-                            orphan: (*or_ptr).swap_null(),
+                            last: (*or_ptr).swap_null(),
+                            last_d: ix as u8,
                         }
                     } else {
                         DeleteResult::Success(deleted)
@@ -1846,7 +1870,8 @@ mod node_variants {
                     }
                     return DeleteResult::Singleton {
                         deleted: deleted,
-                        orphan: node.swap_null(),
+                        last: node.swap_null(),
+                        last_d: i as u8,
                     };
                 }
                 panic!("Should have found a node!")
@@ -1963,14 +1988,25 @@ mod tests {
                 break;
             }
         }
+        let mut failures = 0;
         for i in v2.iter() {
-            s.remove(i);
-            assert!(
-                !s.contains(i),
-                "Deletion failed immediately for {:?}",
-                DebugVal(*i)
-            );
+            let mut fail = 0;
+            if !s.contains(i) {
+                eprintln!("{:?} no longer in the set!", DebugVal(*i));
+                fail = 1;
+            }
+            let res = s.remove(i);
+            if !res {
+                // eprintln!("Deletion failed at call-site for {:?}", DebugVal(*i));
+                fail = 1;
+            }
+            if s.contains(i) {
+                // eprintln!("Deletion failed immediately for {:?}", DebugVal(*i));
+                fail = 1;
+            }
+            failures += fail;
         }
+        assert_eq!(failures, 0);
         let mut failed = false;
         for i in v2.iter() {
             if s.contains(i) {
