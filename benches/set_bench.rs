@@ -9,7 +9,7 @@ use std::collections::btree_set::BTreeSet;
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use radix_tree::{ARTSet, Digital};
+use radix_tree::{ARTSet, ArtElement, Digital, LargeARTSet, PrefixCache, RawART};
 
 /// Barebones set trait to abstract over various collections.
 trait Set<T> {
@@ -19,9 +19,11 @@ trait Set<T> {
     fn delete(&mut self, t: &T) -> bool;
 }
 
-impl<T: for<'a> Digital<'a> + Ord> Set<T> for ARTSet<T> {
+impl<T: for<'a> Digital<'a> + Ord, C: PrefixCache<ArtElement<T>>> Set<T>
+    for RawART<ArtElement<T>, C>
+{
     fn new() -> Self {
-        ARTSet::new()
+        Self::new()
     }
     fn contains(&self, t: &T) -> bool {
         self.contains(t)
@@ -86,6 +88,19 @@ fn bench_set_rand_int_lookup<S: Set<u64>>(b: &mut Bencher, contents: &S, lookups
     let mut ix = 0;
     b.iter(|| {
         contents.contains(&lookups[ix]);
+        ix += 1;
+        ix = ix & (lookups.len() - 1);
+    })
+}
+
+fn bench_set_insert_remove<S: Set<u64>>(b: &mut Bencher, contents: &mut S, lookups: &Vec<u64>) {
+    assert!(lookups.len().is_power_of_two());
+    let mut ix = 0;
+    b.iter(|| {
+        contents.insert(lookups[ix]);
+        ix += 1;
+        ix = ix & (lookups.len() - 1);
+        contents.delete(&lookups[ix]);
         ix += 1;
         ix = ix & (lookups.len() - 1);
     })
@@ -189,25 +204,13 @@ fn criterion_benchmark(c: &mut Criterion) {
             write!(f, "{:?}", self.0.len())
         }
     }
-    let v1s: Vec<SizeVec> = [16 << 10, 1 << 20, 16 << 20]
+    let v1s: Vec<SizeVec> = [16 << 10, 16 << 20, 64 << 20]
         .iter()
         .map(|size: &usize| SizeVec(random_vec(*size, !0), random_vec(*size, !0)))
         .collect();
 
     fn make_fns<S: Set<u64>>() -> Vec<Fun<()>> {
         vec![
-            // Fun::new("16k_lookup_hit", |b, _| {
-            //     bench_set_rand_int_lookup_in_set::<S>(b, 16 << 10, !0)
-            // }),
-            // Fun::new("1M_lookup_hit", |b, _| {
-            //     bench_set_rand_int_lookup_in_set::<S>(b, 1 << 20, !0)
-            // }),
-            // Fun::new("16k_lookup_miss", |b, _| {
-            //     bench_set_rand_int_lookup_not_in_set::<S>(b, 16 << 10, !0)
-            // }),
-            // Fun::new("1M_lookup_miss", |b, _| {
-            //     bench_set_rand_int_lookup_not_in_set::<S>(b, 1 << 20, !0)
-            // }),
             Fun::new("16k_insert_remove", |b, _| {
                 bench_set_rand_int_insert_remove::<S>(b, 16 << 10, !0)
             }),
@@ -217,7 +220,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         ]
     }
     fn make_bench<S: Set<u64> + 'static>(c: &mut Criterion, desc: &str, inp: &Vec<SizeVec>) {
-        eprintln!("Generating for {} (1/2)", desc);
+        eprintln!("Generating for {} (1/3)", desc);
         struct Wrap<T>(SizeVec, Box<T>);
         impl<T> Debug for Wrap<T> {
             fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
@@ -238,7 +241,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<S>(b, &*s, &sv.0),
             sets1,
         );
-        eprintln!("Generating for {} (2/2)", desc);
+        eprintln!("Generating for {} (2/3)", desc);
         let sets2 = inp.iter()
             .map(|sv| {
                 let mut s = S::new();
@@ -253,11 +256,29 @@ fn criterion_benchmark(c: &mut Criterion) {
             |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<S>(b, &*s, &sv.1),
             sets2,
         );
-        c.bench_functions(desc, make_fns::<S>(), ());
+        eprintln!("Generating for {} (3/3)", desc);
+        use std::cell::UnsafeCell;
+        let sets3 = inp.iter()
+            .map(|sv| {
+                let mut s = S::new();
+                for i in sv.0.iter() {
+                    s.insert(*i);
+                }
+                Wrap(sv.clone(), Box::new(UnsafeCell::new(s)))
+            })
+            .collect::<Vec<Wrap<_>>>();
+        unsafe {
+            c.bench_function_over_inputs(
+                &format!("{}/insert_remove", desc),
+                |b, &Wrap(ref sv, ref s)| bench_set_insert_remove::<S>(b, &mut *s.get(), &sv.0),
+                sets3,
+            );
+        }
     }
     make_bench::<HashSet<u64>>(c, "Hashtable", &v1s);
     make_bench::<BTreeSet<u64>>(c, "BTree", &v1s);
     make_bench::<ARTSet<u64>>(c, "ART", &v1s);
+    make_bench::<LargeARTSet<u64>>(c, "LargeART", &v1s);
 }
 
 criterion_group!(benches, criterion_benchmark);

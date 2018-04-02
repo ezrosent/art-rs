@@ -9,6 +9,10 @@ simd = "0.2.1"
 smallvec = "0.6.0"
 fnv = "1.0.3"
 
+[features]
+default = []
+print_cache_stats = []
+
 [dev-dependencies]
 quickcheck = "0.6.1"
 rand = "0.4"

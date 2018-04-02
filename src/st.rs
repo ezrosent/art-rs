@@ -9,6 +9,7 @@ use std::arch::x86::_mm_movemask_epi8;
 use std::arch::x86_64::_mm_movemask_epi8;
 
 use std::borrow::Borrow;
+#[cfg(feature = "print_cache_stats")]
 use std::cell::UnsafeCell;
 use std::cmp;
 use std::marker::PhantomData;
@@ -54,52 +55,85 @@ impl<T: for<'a> Digital<'a> + PartialOrd> Element for ArtElement<T> {
 type RawMutRef<'a, T> = &'a mut RawNode<T>;
 type RawRef<'a, T> = &'a RawNode<T>;
 
-// TODO:
-//  - Add pointers to hashtable to both toplevel and trait-level insert and delete methods
-//  - Use these pointers to re-assign pointers upon growth and deletion
-pub struct RawART<T: Element> {
-    len: usize,
-    root: ChildPtr<T>,
-    prefix_target: usize,
-    buckets: Buckets<T>,
+/// PrefixCache describes types that can cache pointers interior to an ART.
+pub trait PrefixCache<T> {
+    /// If true, the cache is used during ART set operations. If false, the cache is ignored.
+    const ENABLED: bool;
+    fn new(buckets: usize) -> Self;
+    fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>>;
+    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>);
+}
+pub struct NullBuckets<T>(PhantomData<T>);
+
+impl<T> PrefixCache<T> for NullBuckets<T> {
+    const ENABLED: bool = false;
+    fn new(_: usize) -> Self {
+        NullBuckets(PhantomData)
+    }
+    fn lookup(&self, _: &[u8]) -> Option<MarkedPtr<T>> {
+        None
+    }
+    fn insert(&mut self, _: &[u8], _ptr: MarkedPtr<T>) {}
 }
 
-struct Buckets<T> {
+pub struct HashBuckets<T> {
     data: Vec<(u64, MarkedPtr<T>)>,
-    misses: UnsafeCell<usize>,
-    hits: UnsafeCell<usize>,
-    collisions: UnsafeCell<usize>,
     len: usize,
+    #[cfg(feature = "print_cache_stats")]
+    misses: UnsafeCell<usize>,
+    #[cfg(feature = "print_cache_stats")]
+    hits: UnsafeCell<usize>,
+    #[cfg(feature = "print_cache_stats")]
+    collisions: UnsafeCell<usize>,
+    #[cfg(feature = "print_cache_stats")]
+    overwrites: usize,
 }
 
-impl<T> Drop for Buckets<T> {
+impl<T> Drop for HashBuckets<T> {
     fn drop(&mut self) {
+        #[cfg(feature = "print_cache_stats")]
         unsafe {
             let h = *self.hits.get();
             let m = *self.misses.get();
             let c = *self.collisions.get();
             eprintln!(
-                "hits={:?} miss={:?} collisions={:?} hit rate={:?} len={:?}",
+                "hits={:?} miss={:?} collisions={:?} hit rate={:?} len={:?} overwrites={:?}",
                 h,
                 m,
                 c,
                 h as f64 / (h + m + c) as f64,
-                self.len
+                self.len,
+                self.overwrites
             );
         }
     }
 }
 
-impl<T> Buckets<T> {
+impl<T> PrefixCache<T> for HashBuckets<T> {
+    const ENABLED: bool = true;
+
     fn new(size: usize) -> Self {
-        Buckets {
-            data: (0..size.next_power_of_two())
-                .map(|_| (0, MarkedPtr::null()))
-                .collect::<Vec<_>>(),
-            misses: UnsafeCell::new(0),
-            hits: UnsafeCell::new(0),
-            collisions: UnsafeCell::new(0),
-            len: 0,
+        #[cfg(feature = "print_cache_stats")]
+        {
+            HashBuckets {
+                data: (0..size.next_power_of_two())
+                    .map(|_| (0, MarkedPtr::null()))
+                    .collect::<Vec<_>>(),
+                misses: UnsafeCell::new(0),
+                hits: UnsafeCell::new(0),
+                collisions: UnsafeCell::new(0),
+                overwrites: 0,
+                len: 0,
+            }
+        }
+        #[cfg(not(feature = "print_cache_stats"))]
+        {
+            HashBuckets {
+                data: (0..size.next_power_of_two())
+                    .map(|_| (0, MarkedPtr::null()))
+                    .collect::<Vec<_>>(),
+                len: 0,
+            }
         }
     }
 
@@ -107,21 +141,40 @@ impl<T> Buckets<T> {
         let key = self.get_index(bs);
         let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
         if ptr.is_null() {
+            #[cfg(feature = "print_cache_stats")]
             unsafe { *self.misses.get() += 1 };
             None
         } else {
             let key = Self::read_u64(bs);
             if key == i {
+                #[cfg(feature = "print_cache_stats")]
                 unsafe { *self.hits.get() += 1 };
                 Some(ptr)
             } else {
+                #[cfg(feature = "print_cache_stats")]
                 unsafe { *self.collisions.get() += 1 };
-                // eprintln!("{:?} collided with {:?}", Self::read_u64(bs), i);
                 None
             }
         }
     }
 
+    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
+        let h = self.get_index(bs);
+        let key = Self::read_u64(bs);
+        if unsafe { self.data.get_unchecked(h).1.is_null() } {
+            self.len += 1;
+        }
+        #[cfg(feature = "print_cache_stats")]
+        {
+            let (k, _ptr) = unsafe { self.data.get_unchecked(h) }.clone();
+            if !_ptr.is_null() && k == key {
+                self.overwrites += 1;
+            }
+        }
+        unsafe { *self.data.get_unchecked_mut(h) = (key, ptr) };
+    }
+}
+impl<T> HashBuckets<T> {
     fn read_u64(bs: &[u8]) -> u64 {
         debug_assert!(bs.len() <= 8);
         let mut arr = [0 as u8; 8];
@@ -134,29 +187,16 @@ impl<T> Buckets<T> {
         use self::fnv::FnvHasher;
         use std::hash::Hasher;
         let mut hasher = FnvHasher::default();
-        let mut u = Self::read_u64(bs);
-        u ^= u >> 33;
-        u = u.wrapping_mul(18397679294719823053);
-        u ^= u >> 33;
-        u = u.wrapping_mul(14181476777654086739);
-        u ^= u >> 33;
+        let u = Self::read_u64(bs);
         hasher.write_u64(u);
         hasher.finish() as usize & (self.data.len() - 1)
     }
-
-    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
-        let h = self.get_index(bs);
-        let key = Self::read_u64(bs);
-        if unsafe { self.data.get_unchecked(h).1.is_null() } {
-            self.len += 1;
-        }
-        unsafe { *self.data.get_unchecked_mut(h) = (key, ptr) };
-    }
 }
 
-pub type ARTSet<T> = RawART<ArtElement<T>>;
+pub type ARTSet<T> = RawART<ArtElement<T>, NullBuckets<ArtElement<T>>>;
+pub type LargeARTSet<T> = RawART<ArtElement<T>, HashBuckets<ArtElement<T>>>;
 
-impl<T: for<'a> Digital<'a> + PartialOrd> ARTSet<T> {
+impl<T: for<'a> Digital<'a> + PartialOrd, C: PrefixCache<ArtElement<T>>> RawART<ArtElement<T>, C> {
     pub fn contains<Q>(&self, key: &Q) -> bool
     where
         Q: Borrow<T> + ?Sized,
@@ -272,10 +312,17 @@ macro_rules! with_node {
         with_node_inner!($base_node, $nod, $body, RawRef, $ty)
     };
 }
-enum InsertResult<T> {
+
+enum PartialResult<T> {
     Failure(T),
     Replaced(T),
     Success,
+}
+
+enum PartialDeleteResult<T> {
+    Partial,
+    Failure,
+    Success(T),
 }
 
 // TODO:
@@ -288,9 +335,16 @@ enum InsertResult<T> {
 //   value and remove it from the table if necessary. [half-done]
 // 4 Clean this shit up!
 
-impl<T: Element> RawART<T> {
+pub struct RawART<T: Element, C: PrefixCache<T>> {
+    len: usize,
+    root: ChildPtr<T>,
+    prefix_target: usize,
+    buckets: C,
+}
+
+impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub fn new() -> Self {
-        RawART::with_prefix_buckets(3, 256 * 256)
+        RawART::with_prefix_buckets(3, 256 * 256 * 256 * 2)
     }
 
     pub fn with_prefix_buckets(prefix_len: usize, buckets: usize) -> Self {
@@ -298,7 +352,7 @@ impl<T: Element> RawART<T> {
         RawART {
             len: 0,
             root: ChildPtr::null(),
-            buckets: Buckets::new(buckets),
+            buckets: C::new(buckets),
             prefix_target: prefix_len,
         }
     }
@@ -366,36 +420,39 @@ impl<T: Element> RawART<T> {
                 }
             }
         }
-
-        let node_ref = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
-            let _kint = *(k as *const _ as *const u64);
-            // eprintln!("hash lookup on {}", _kint);
-            ptr
+        if C::ENABLED {
+            let node_ref = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+                ptr
+            } else {
+                self.root.to_marked()
+            };
+            lookup_raw_recursive(node_ref, k, digits.as_slice(), 0, true)
         } else {
-            self.root.to_marked()
-        };
-        lookup_raw_recursive(node_ref, k, digits.as_slice(), 0, true)
+            lookup_raw_recursive(self.root.to_marked(), k, digits.as_slice(), 0, true)
+        }
     }
 
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
-        // TODO emit log on failure with which branch failed
-        // fn emit_fail_log_int<T>...
         // Also, consider hypothesis that promoting last doesn't work, and is leading to failed
         // lookups
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
-        unsafe fn delete_raw_recursive<T: Element>(
+        use self::PartialDeleteResult::*;
+        unsafe fn delete_raw_recursive<T: Element, C: PrefixCache<T>>(
             k: &T::Key,
-            curr: &mut ChildPtr<T>,
+            mut curr: MarkedPtr<T>,
+            curr_ptr: Option<&mut ChildPtr<T>>,
             parent: Option<(u8, &mut ChildPtr<T>)>,
             digits: &[u8],
             mut consumed: usize,
             target: usize,
-            buckets: &mut Buckets<T>,
+            buckets: &mut C,
+            is_root: bool,
             // return the deleted node
-        ) -> Option<T> {
+        ) -> PartialDeleteResult<T> {
+            use self::PartialDeleteResult::*;
             if curr.is_null() {
-                return None;
+                return Failure;
             }
             unsafe fn move_val_out<T>(mut cptr: ChildPtr<T>) -> T {
                 let res = {
@@ -425,11 +482,15 @@ impl<T: Element> RawART<T> {
                                 {
                                     match node.delete(d) {
                                         DeleteResult::Success(deleted) => {
-                                            (Some(move_val_out(deleted)), None)
+                                            (Success(move_val_out(deleted)), None)
                                         }
-                                        DeleteResult::Singleton { deleted, last, last_d } => {
+                                        DeleteResult::Singleton {
+                                            deleted,
+                                            last,
+                                            last_d,
+                                        } => {
                                             debug_assert!(deleted.get().unwrap().is_ok());
-                                            (Some(move_val_out(deleted)), Some((last, last_d)))
+                                            (Success(move_val_out(deleted)), Some((last, last_d)))
                                         }
                                         DeleteResult::Failure => unreachable!(),
                                     }
@@ -443,7 +504,7 @@ impl<T: Element> RawART<T> {
                                 let mut ds = SmallVec::<[u8; 8]>::new();
                                 {
                                     let pp = parent_ref.get_mut().unwrap().err().unwrap();
-                                    if pp.consumed as usize <= target
+                                    if C::ENABLED && pp.consumed as usize <= target
                                         && target <= pp.consumed as usize + pp.count as usize
                                     {
                                         // We want to construct enough context to clear out the
@@ -455,11 +516,16 @@ impl<T: Element> RawART<T> {
                                         // not present in 'pp'. Below we do the same for `inner` in
                                         // case it replaces 'pp'.
                                         replace = true;
-                                        for dd in &digits[..pp.consumed as usize] {
-                                            ds.push(*dd)
+                                        if digits.len() < target {
+                                            for dd in &digits[..pp.consumed as usize] {
+                                                ds.push(*dd)
+                                            }
                                         }
                                     }
                                     if let Err(inner) = c_ptr.get_mut().unwrap() {
+                                        // The "last" node that we are promoting is an interior
+                                        // node. As a result, we have to modify its prefix and
+                                        // potentially insert it into the prefix cache.
                                         let parent_count = pp.count;
                                         let mut prefix_digits =
                                             SmallVec::<[u8; PREFIX_LEN + 1]>::new();
@@ -474,39 +540,48 @@ impl<T: Element> RawART<T> {
                                             prefix_digits.len() as u32,
                                         );
                                         debug_assert_eq!(inner.consumed, pp.consumed);
-                                        if inner.consumed as usize <= target
+                                        if C::ENABLED && inner.consumed as usize <= target
                                             && target
                                                 <= inner.consumed as usize + inner.count as usize
                                         {
                                             switch = true;
-                                            if !replace {
-                                                for dd in &digits[..pp.consumed as usize] {
+                                            if digits.len() < target {
+                                                if !replace {
+                                                    for dd in &digits[..pp.consumed as usize] {
+                                                        ds.push(*dd);
+                                                    }
+                                                }
+                                                for dd in &inner.prefix
+                                                    [..cmp::min(inner.count as usize, PREFIX_LEN)]
+                                                {
                                                     ds.push(*dd);
                                                 }
                                             }
-                                            for dd in &inner.prefix[..cmp::min(inner.count as usize, PREFIX_LEN)] {
-                                                ds.push(*dd);
-                                            }
                                         }
                                     }
-                                    if replace &&  !switch {
-                                        for dd in &pp.prefix[..cmp::min(pp.count as usize, PREFIX_LEN)] {
+                                    if C::ENABLED && replace && !switch && digits.len() < target {
+                                        for dd in
+                                            &pp.prefix[..cmp::min(pp.count as usize, PREFIX_LEN)]
+                                        {
                                             ds.push(*dd);
                                         }
                                     }
                                 }
                                 mem::swap(parent_ref, &mut c_ptr);
-                                let mut d_slice = &digits[..];
-                                if digits.len() < target && (switch || replace) {
-                                    debug_assert!(target <= 8);
-                                    // need to construct new digits
-                                    d_slice = ds.as_slice();
-                                } 
-                                if switch {
-                                    buckets.insert(&d_slice[0..target], (*parent_ref).to_marked());
-                                    debug_assert!(parent_ref.get().unwrap().is_err());
-                                } else if replace {
-                                    buckets.insert(&d_slice[0..target], MarkedPtr::null());
+                                if C::ENABLED {
+                                    let mut d_slice = &digits[..];
+                                    if digits.len() < target && (switch || replace) {
+                                        debug_assert!(target <= 8);
+                                        // need to construct new digits
+                                        d_slice = ds.as_slice();
+                                    }
+                                    if switch {
+                                        buckets
+                                            .insert(&d_slice[0..target], (*parent_ref).to_marked());
+                                        debug_assert!(parent_ref.get().unwrap().is_err());
+                                    } else if replace {
+                                        buckets.insert(&d_slice[0..target], MarkedPtr::null());
+                                    }
                                 }
                             }
                             return res;
@@ -514,11 +589,11 @@ impl<T: Element> RawART<T> {
                             None
                         }
                     } else {
-                        return None;
+                        return Failure;
                     }
                 }
                 Err(inner_node) => {
-                    debug_assert_eq!(consumed, inner_node.consumed as usize);
+                    consumed = inner_node.consumed as usize;
                     let (matched, _) = inner_node.get_matching_prefix(
                         digits,
                         consumed,
@@ -531,63 +606,100 @@ impl<T: Element> RawART<T> {
                         Some((inner_node as *mut RawNode<()>, matched))
                     } else {
                         // prefix was not a match, the key is not here
-                        return None;
+                        return Failure;
                     }
                 }
             };
             if let Some((inner_node, matched)) = rest_opts {
                 let next_digit = digits[consumed + matched];
                 with_node_mut!(&mut *inner_node, node, {
-                    node.find_mut(next_digit).and_then(|c_ptr| {
+                    if let Some(c_ptr) = node.find_mut(next_digit) {
                         consumed += matched + 1;
+                        let marked = c_ptr.to_marked();
                         delete_raw_recursive(
                             k,
-                            c_ptr,
-                            Some((next_digit, curr)),
+                            marked,
+                            Some(c_ptr),
+                            curr_ptr.map(|x| (next_digit, x)),
                             digits,
                             consumed,
                             target,
                             buckets,
+                            false,
                         )
-                    })
+                    } else {
+                        Failure
+                    }
                 })
-            } else {
+            } else if let Some(cp) = curr_ptr {
                 // we are in the root, set curr to null.
-                let c_ptr = curr.swap_null();
-                buckets.insert(&digits[0..target], MarkedPtr::null());
-                Some(move_val_out(c_ptr))
+                if !is_root { return Partial; }
+                let c_ptr = cp.swap_null();
+                if C::ENABLED {
+                    buckets.insert(&digits[0..target], MarkedPtr::null());
+                }
+                Success(move_val_out(c_ptr))
+            } else {
+                Partial
             }
         }
-        let res = delete_raw_recursive(
-            k,
-            &mut self.root,
-            None,
-            &digits[..],
-            0,
-            self.prefix_target,
-            &mut self.buckets,
-        );
-        if res.is_some() {
-            debug_assert!(self.len > 0);
-            self.len -= 1;
+        let mut res = Partial;
+        if C::ENABLED {
+            res = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+                delete_raw_recursive(
+                    k,
+                    ptr,
+                    None,
+                    None,
+                    &digits[..],
+                    0,
+                    self.prefix_target,
+                    &mut self.buckets,
+                    false,
+                )
+            } else {
+                Partial
+            };
         }
-        res
+        if let Partial = res {
+            let marked_root = self.root.to_marked();
+            res = delete_raw_recursive(
+                k,
+                marked_root,
+                Some(&mut self.root),
+                None,
+                &digits[..],
+                0,
+                self.prefix_target,
+                &mut self.buckets,
+                true,
+            );
+        }
+        match res {
+            Success(x) => {
+                debug_assert!(self.len > 0);
+                self.len -= 1;
+                Some(x)
+            }
+            Failure => None,
+            Partial => panic!("Got a partial!"),
+        }
     }
 
     pub unsafe fn insert_raw(&mut self, elt: T) -> Result<(), T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(elt.key().digits());
 
-        unsafe fn insert_raw_recursive<T: Element>(
+        unsafe fn insert_raw_recursive<T: Element, C: PrefixCache<T>>(
             curr: MarkedPtr<T>,
             mut e: T,
             digits: &[u8],
             mut consumed: usize,
             pptr: Option<*mut ChildPtr<T>>,
-            buckets: &mut Buckets<T>,
+            buckets: &mut C,
             target: usize,
-        ) -> InsertResult<T> {
-            use self::InsertResult::*;
+        ) -> PartialResult<T> {
+            use self::PartialResult::*;
             debug_assert!(consumed <= digits.len());
             if curr.is_null() {
                 // Case 1: We found a null pointer, just replace it with a new leaf.
@@ -628,7 +740,9 @@ impl<T: Element> RawART<T> {
                     let mut leaf_ptr = ChildPtr::from_node(n4_raw);
                     let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                     mem::swap(&mut *pp, &mut leaf_ptr);
-                    if consumed <= target && target <= consumed + (*n4_raw).count as usize {
+                    if C::ENABLED && consumed <= target
+                        && target <= consumed + (*n4_raw).count as usize
+                    {
                         buckets.insert(&digits[0..target], (*pp).to_marked());
                         debug_assert!((*pp).get().unwrap().is_err());
                     }
@@ -696,13 +810,13 @@ impl<T: Element> RawART<T> {
                                 );
                             }
                             let full = nod.is_full();
-                            if full && pptr.is_none() {
+                            if C::ENABLED && full && pptr.is_none() {
                                 return Failure(e);
                             }
                             let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                             let _r = nod.insert(d, c_ptr, pptr);
                             debug_assert!(_r.is_ok());
-                            if full && nod.consumed as usize <= target
+                            if C::ENABLED && full && nod.consumed as usize <= target
                                 && target <= nod.consumed as usize + nod.count as usize
                             {
                                 buckets.insert(&digits[0..target], (*pptr.unwrap()).to_marked());
@@ -766,7 +880,9 @@ impl<T: Element> RawART<T> {
                         let pp = pptr.unwrap();
                         let mut n4_cptr = ChildPtr::from_node(n4_raw);
                         mem::swap(&mut *pp, &mut n4_cptr);
-                        if consumed <= target && target <= consumed + (*n4_raw).count as usize {
+                        if C::ENABLED && consumed <= target
+                            && target <= consumed + (*n4_raw).count as usize
+                        {
                             buckets.insert(&digits[0..target], (*pp).to_marked());
                             debug_assert!((*pp).get().unwrap().is_err());
                         }
@@ -776,57 +892,77 @@ impl<T: Element> RawART<T> {
             };
             Success
         }
-        let e = {
-            let (node_ref, consumed, pptr) = if let Some(ptr) = self.hash_lookup(digits.as_slice())
-            {
-                (ptr, self.prefix_target, None)
-            } else {
-                let root_alias = Some(&mut self.root as *mut _);
-                (self.root.to_marked(), 0, root_alias)
+        if C::ENABLED {
+            let e = {
+                let (node_ref, consumed, pptr) =
+                    if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+                        (ptr, self.prefix_target, None)
+                    } else {
+                        let root_alias = Some(&mut self.root as *mut _);
+                        (self.root.to_marked(), 0, root_alias)
+                    };
+                match insert_raw_recursive(
+                    node_ref,
+                    elt,
+                    digits.as_slice(),
+                    consumed,
+                    pptr,
+                    &mut self.buckets,
+                    self.prefix_target,
+                ) {
+                    PartialResult::Failure(e) => e,
+                    PartialResult::Success => {
+                        self.len += 1;
+                        return Ok(());
+                    }
+                    PartialResult::Replaced(t) => {
+                        return Err(t);
+                    }
+                }
             };
+            // Hash-indexed inserts can fail, retry a default root-based traversal.
+            let root_alias = Some(&mut self.root as *mut _);
             match insert_raw_recursive(
-                node_ref,
-                elt,
+                self.root.to_marked(),
+                e,
                 digits.as_slice(),
-                consumed,
-                pptr,
+                0,
+                root_alias,
                 &mut self.buckets,
                 self.prefix_target,
             ) {
-                InsertResult::Failure(e) => e,
-                InsertResult::Success => {
+                PartialResult::Success => {
                     self.len += 1;
-                    return Ok(());
+                    Ok(())
                 }
-                InsertResult::Replaced(t) => {
-                    return Err(t);
+                PartialResult::Replaced(t) => Err(t),
+                PartialResult::Failure(_) => unreachable!(),
+            }
+        } else {
+            let root_alias = Some(&mut self.root as *mut _);
+            match insert_raw_recursive(
+                self.root.to_marked(),
+                elt,
+                digits.as_slice(),
+                0,
+                root_alias,
+                &mut self.buckets,
+                self.prefix_target,
+            ) {
+                PartialResult::Success => {
+                    self.len += 1;
+                    Ok(())
                 }
+                PartialResult::Replaced(t) => Err(t),
+                PartialResult::Failure(_) => unreachable!(),
             }
-        };
-        // Hash-indexed inserts can fail, retry a default root-based traversal.
-        let root_alias = Some(&mut self.root as *mut _);
-        match insert_raw_recursive(
-            self.root.to_marked(),
-            e,
-            digits.as_slice(),
-            0,
-            root_alias,
-            &mut self.buckets,
-            self.prefix_target,
-        ) {
-            InsertResult::Success => {
-                self.len += 1;
-                Ok(())
-            }
-            InsertResult::Replaced(t) => Err(t),
-            InsertResult::Failure(_) => unreachable!(),
         }
     }
 }
 
 // TODO: use NonNull everywhere
 
-struct MarkedPtr<T>(usize, PhantomData<T>);
+pub struct MarkedPtr<T>(usize, PhantomData<T>);
 impl<T> Clone for MarkedPtr<T> {
     fn clone(&self) -> Self {
         MarkedPtr(self.0, PhantomData)
@@ -1306,7 +1442,7 @@ mod node_variants {
                     );
                     if $slf.children == 1 {
                         let mut c_ptr = ChildPtr::null();
-                        debug_assert!(!$slf.node.ptrs[0].is_null());
+                        debug_assert!(!$slf.node.ptrs[0].is_null(), "{:?} Uh oh! {:?}", $slf as *const _, $slf);
                         mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
                         DeleteResult::Singleton {
                             deleted: deleted,
@@ -1319,6 +1455,11 @@ mod node_variants {
                 }
             }
         };
+    }
+    impl<T> ::std::fmt::Debug for Node16<T> {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
+            write!(f, "Node4({:?}, {:?})", self.keys, &self.ptrs[..])
+        }
     }
 
     fn is_sorted(slice: &[u8]) -> bool {
@@ -1924,6 +2065,15 @@ mod tests {
     use super::super::rand::Rng;
     use std::fmt::{Debug, Error, Formatter};
 
+    macro_rules! for_each_set {
+        ($s:ident, $body:expr, $( $base:tt - $param:tt),+) => {
+            $({
+                let mut $s = $base::<$param>::new();
+                $body
+            };)+
+        };
+    }
+
     fn random_vec(max_val: u64, len: usize) -> Vec<u64> {
         let mut rng = rand::thread_rng();
         (0..len).map(|_| rng.gen_range::<u64>(0, max_val)).collect()
@@ -1954,131 +2104,143 @@ mod tests {
 
     #[test]
     fn basic_set_behavior() {
-        let mut s = ARTSet::<u64>::new();
-        let mut v1 = random_vec(!0, 1 << 18);
-        for item in v1.iter() {
-            s.add(*item);
-            assert!(
-                s.contains(item),
-                "lookup failed immediately for {:?}",
-                DebugVal(*item)
-            );
-        }
-        let mut missing = Vec::new();
-        for item in v1.iter() {
-            if !s.contains(item) {
-                missing.push(*item)
-            }
-        }
-        let v: Vec<_> = missing
-            .iter()
-            .map(|x| {
-                let v: Vec<_> = x.digits().collect();
-                (x, v)
-            })
-            .collect();
-        assert_eq!(missing.len(), 0, "missing={:?}", v);
-        v1.sort();
-        v1.dedup_by_key(|x| *x);
-        let mut v2 = Vec::new();
-        for _ in 0..(1 << 17) {
-            if let Some(x) = v1.pop() {
-                v2.push(x)
-            } else {
-                break;
-            }
-        }
-        let mut failures = 0;
-        for i in v2.iter() {
-            let mut fail = 0;
-            if !s.contains(i) {
-                eprintln!("{:?} no longer in the set!", DebugVal(*i));
-                fail = 1;
-            }
-            let res = s.remove(i);
-            if !res {
-                // eprintln!("Deletion failed at call-site for {:?}", DebugVal(*i));
-                fail = 1;
-            }
-            if s.contains(i) {
-                // eprintln!("Deletion failed immediately for {:?}", DebugVal(*i));
-                fail = 1;
-            }
-            failures += fail;
-        }
-        assert_eq!(failures, 0);
-        let mut failed = false;
-        for i in v2.iter() {
-            if s.contains(i) {
-                eprintln!("Deleted {:?}, but it's still there!", DebugVal(*i));
-                failed = true;
-            };
-        }
-        assert!(!failed);
-        for i in v1.iter() {
-            assert!(
-                s.contains(i),
-                "Didn't delete {:?}, but it is gone!",
-                DebugVal(*i)
-            );
-        }
+        for_each_set!(
+            s,
+            {
+                let mut v1 = random_vec(!0, 1 << 18);
+                for item in v1.iter() {
+                    s.add(*item);
+                    assert!(
+                        s.contains(item),
+                        "lookup failed immediately for {:?}",
+                        DebugVal(*item)
+                    );
+                }
+                let mut missing = Vec::new();
+                for item in v1.iter() {
+                    if !s.contains(item) {
+                        missing.push(*item)
+                    }
+                }
+                let v: Vec<_> = missing
+                    .iter()
+                    .map(|x| {
+                        let v: Vec<_> = x.digits().collect();
+                        (x, v)
+                    })
+                    .collect();
+                assert_eq!(missing.len(), 0, "missing={:?}", v);
+                v1.sort();
+                v1.dedup_by_key(|x| *x);
+                let mut v2 = Vec::new();
+                for _ in 0..(1 << 17) {
+                    if let Some(x) = v1.pop() {
+                        v2.push(x)
+                    } else {
+                        break;
+                    }
+                }
+                let mut failures = 0;
+                for i in v2.iter() {
+                    let mut fail = 0;
+                    if !s.contains(i) {
+                        eprintln!("{:?} no longer in the set!", DebugVal(*i));
+                        fail = 1;
+                    }
+                    let res = s.remove(i);
+                    if !res {
+                        // eprintln!("Deletion failed at call-site for {:?}", DebugVal(*i));
+                        fail = 1;
+                    }
+                    if s.contains(i) {
+                        // eprintln!("Deletion failed immediately for {:?}", DebugVal(*i));
+                        fail = 1;
+                    }
+                    failures += fail;
+                }
+                assert_eq!(failures, 0);
+                let mut failed = false;
+                for i in v2.iter() {
+                    if s.contains(i) {
+                        eprintln!("Deleted {:?}, but it's still there!", DebugVal(*i));
+                        failed = true;
+                    };
+                }
+                assert!(!failed);
+                for i in v1.iter() {
+                    assert!(
+                        s.contains(i),
+                        "Didn't delete {:?}, but it is gone!",
+                        DebugVal(*i)
+                    );
+                }
+            },
+            ARTSet - u64,
+            LargeARTSet - u64
+        );
     }
 
     #[test]
     fn string_set_behavior() {
-        let mut s = ARTSet::<String>::new();
-        let mut v1 = random_string_vec(64, 1 << 18);
-        for item in v1.iter() {
-            s.add(item.clone());
-            assert!(s.contains(item));
-        }
-        let mut missing = Vec::new();
-        for item in v1.iter() {
-            if !s.contains(item) {
-                missing.push(item.clone())
-            }
-        }
-        let v: Vec<_> = missing
-            .iter()
-            .map(|x| {
-                let v: Vec<_> = x.digits().collect();
-                (x, v)
-            })
-            .collect();
-        assert_eq!(missing.len(), 0, "missing={:?}", v);
-        v1.sort();
-        v1.dedup_by_key(|x| x.clone());
-        let mut v2 = Vec::new();
-        for _ in 0..(1 << 17) {
-            if let Some(x) = v1.pop() {
-                v2.push(x)
-            } else {
-                break;
-            }
-        }
-        for i in v2.iter() {
-            s.remove(i);
-            assert!(
-                !s.contains(i),
-                "Deletion failed immediately for {:?}",
-                DebugVal(i.clone())
-            );
-        }
-        let mut failed = false;
-        for i in v2.iter() {
-            if s.contains(i) {
-                eprintln!("Deleted {:?}, but it's still there!", DebugVal(i.clone()));
-                failed = true;
-            };
-        }
-        assert!(!failed);
-        for i in v1.iter() {
-            assert!(
-                s.contains(i),
-                "Didn't delete {:?}, but it is gone!",
-                i.clone()
-            );
-        }
+        for_each_set!(
+            s,
+            {
+                let mut v1 = random_string_vec(64, 1 << 18);
+                for item in v1.iter() {
+                    s.add(item.clone());
+                    assert!(s.contains(item));
+                }
+                let mut missing = Vec::new();
+                for item in v1.iter() {
+                    if !s.contains(item) {
+                        missing.push(item.clone())
+                    }
+                }
+                let v: Vec<_> = missing
+                    .iter()
+                    .map(|x| {
+                        let v: Vec<_> = x.digits().collect();
+                        (x, v)
+                    })
+                    .collect();
+                assert_eq!(missing.len(), 0, "missing={:?}", v);
+                v1.sort();
+                v1.dedup_by_key(|x| x.clone());
+                let mut v2 = Vec::new();
+                for _ in 0..(1 << 17) {
+                    if let Some(x) = v1.pop() {
+                        v2.push(x)
+                    } else {
+                        break;
+                    }
+                }
+                for i in v2.iter() {
+                    s.remove(i);
+                    assert!(
+                        !s.contains(i),
+                        "Deletion failed immediately for {:?}",
+                        DebugVal(i.clone())
+                    );
+                }
+                let mut failed = false;
+                for i in v2.iter() {
+                    if s.contains(i) {
+                        eprintln!("Deleted {:?}, but it's still there!", DebugVal(i.clone()));
+                        failed = true;
+                    };
+                }
+                assert!(!failed);
+                for i in v1.iter() {
+                    assert!(
+                        s.contains(i),
+                        "Didn't delete {:?}, but it is gone!",
+                        i.clone()
+                    );
+                }
+            },
+            ARTSet - String,
+            LargeARTSet - String
+        );
     }
 
     fn assert_lists_equal<T: Debug + Eq + for<'a> Digital<'a> + Clone>(v1: &[T], v2: &[T]) {
