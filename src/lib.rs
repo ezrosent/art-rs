@@ -1,12 +1,18 @@
 #![feature(swap_nonoverlapping)]
 #![feature(cfg_target_feature)]
 #![feature(stdsimd)]
+#[macro_use]
+mod macros;
 mod common;
-mod st;
+mod art_impl;
+mod art_internal;
+mod prefix_cache;
+
 extern crate byteorder;
+extern crate smallvec;
 
 pub use common::Digital;
-pub use st::*;
+pub use art_impl::*;
 #[cfg(test)]
 #[macro_use]
 extern crate quickcheck;
