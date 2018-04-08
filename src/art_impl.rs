@@ -223,7 +223,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             let (elligible, opt) = self.hash_lookup(digits.as_slice());
             let node_ref = if let Some(ptr) = opt {
                 ptr
-            } else if C::COMPLETE && elligible {
+            } else if C::COMPLETE && elligible && self.len > 1 {
                 return None;
             } else {
                 self.root.to_marked()
@@ -462,7 +462,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     &mut self.buckets,
                     false,
                 )
-            } else if C::COMPLETE && elligible {
+            } else if C::COMPLETE && elligible && self.len > 1 {
                 return None;
             } else {
                 Partial
