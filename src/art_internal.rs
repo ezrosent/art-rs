@@ -107,13 +107,17 @@ impl<T> MarkedPtr<T> {
         MarkedPtr(p as usize, PhantomData)
     }
 
-    fn from_leaf(p: *mut T) -> Self {
+    pub fn from_leaf(p: *mut T) -> Self {
         debug_assert!(!p.is_null());
         MarkedPtr((p as usize) | 1, PhantomData)
     }
 
     pub fn is_null(&self) -> bool {
         self.0 == 0
+    }
+
+    pub fn raw_eq(&self, other: usize) -> bool {
+        self.0 == other
     }
 
     pub unsafe fn get(&self) -> Option<Result<&T, &RawNode<()>>> {
@@ -152,6 +156,21 @@ unsafe fn place_in_hole_at<T>(slice: &mut [T], at: usize, v: T, buff_len: usize)
     let target = raw_p.offset(at as isize);
     ptr::copy(target, raw_p.offset(at as isize + 1), buff_len - at - 1);
     ptr::write(target, v);
+}
+
+#[cfg(test)]
+mod place_test {
+    use super::*;
+
+    #[test]
+    fn place_in_hole_test() {
+        let mut v1 = vec![0, 1, 3, 4, 0];
+        let len = v1.len();
+        unsafe {
+            place_in_hole_at(&mut v1[..], 2, 2, len);
+        }
+        assert_eq!(v1, vec![0, 1, 2, 3, 4]);
+    }
 }
 
 #[repr(C)]

@@ -7,8 +7,9 @@ use std::ptr;
 
 use super::Digital;
 use super::art_internal::*;
-use super::prefix_cache::{HashBuckets, NullBuckets, PrefixCache};
+use super::prefix_cache::{HashBuckets, HashSetPrefixCache, NullBuckets};
 use super::smallvec::SmallVec;
+pub use super::prefix_cache::PrefixCache;
 
 pub struct ArtElement<T: for<'a> Digital<'a> + PartialOrd>(T);
 
@@ -35,6 +36,7 @@ impl<T: for<'a> Digital<'a> + PartialOrd> Element for ArtElement<T> {
 }
 
 pub type ARTSet<T> = RawART<ArtElement<T>, NullBuckets<ArtElement<T>>>;
+pub type MidARTSet<T> = RawART<ArtElement<T>, HashSetPrefixCache<ArtElement<T>>>;
 pub type LargeARTSet<T> = RawART<ArtElement<T>, HashBuckets<ArtElement<T>>>;
 
 impl<T: for<'a> Digital<'a> + PartialOrd, C: PrefixCache<ArtElement<T>>> RawART<ArtElement<T>, C> {
@@ -152,7 +154,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         self.len
     }
 
-    fn hash_lookup(&self, digits: &[u8]) -> Option<MarkedPtr<T>> {
+    fn hash_lookup(&self, digits: &[u8]) -> (bool, Option<MarkedPtr<T>>) {
         // TODO this has to be modified to signal whether digits has a prefix that is too short, or
         // if the lookup failed.
         //
@@ -160,9 +162,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         // - padded out with stop character for things like string
         // - disallowed for u64, because all "digits" slices are of the same length
         if digits.len() <= self.prefix_target {
-            None
+            (false, None)
         } else {
-            self.buckets.lookup(&digits[0..self.prefix_target])
+            (true, self.buckets.lookup(&digits[0..self.prefix_target]))
         }
     }
 
@@ -218,8 +220,11 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             }
         }
         if C::ENABLED {
-            let node_ref = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+            let (elligible, opt) = self.hash_lookup(digits.as_slice());
+            let node_ref = if let Some(ptr) = opt {
                 ptr
+            } else if C::COMPLETE && elligible {
+                return None;
             } else {
                 self.root.to_marked()
             };
@@ -444,7 +449,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         }
         let mut res = Partial;
         if C::ENABLED {
-            res = if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+            let (elligible, opt) = self.hash_lookup(digits.as_slice());
+            res = if let Some(ptr) = opt {
                 delete_raw_recursive(
                     k,
                     ptr,
@@ -456,6 +462,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     &mut self.buckets,
                     false,
                 )
+            } else if C::COMPLETE && elligible {
+                return None;
             } else {
                 Partial
             };
@@ -693,13 +701,14 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         }
         if C::ENABLED {
             let e = {
-                let (node_ref, consumed, pptr) =
-                    if let Some(ptr) = self.hash_lookup(digits.as_slice()) {
+                let (node_ref, consumed, pptr) = {
+                    if let Some(ptr) = self.hash_lookup(digits.as_slice()).1 {
                         (ptr, self.prefix_target, None)
                     } else {
                         let root_alias = Some(&mut self.root as *mut _);
                         (self.root.to_marked(), 0, root_alias)
-                    };
+                    }
+                };
                 match insert_raw_recursive(
                     node_ref,
                     elt,
@@ -756,23 +765,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 PartialResult::Failure(_) => unreachable!(),
             }
         }
-    }
-}
-
-// TODO: use NonNull everywhere
-
-#[cfg(test)]
-mod place_test {
-    use super::*;
-
-    #[test]
-    fn place_in_hole_test() {
-        let mut v1 = vec![0, 1, 3, 4, 0];
-        let len = v1.len();
-        unsafe {
-            place_in_hole_at(&mut v1[..], 2, 2, len);
-        }
-        assert_eq!(v1, vec![0, 1, 2, 3, 4]);
     }
 }
 
@@ -894,6 +886,7 @@ mod tests {
                 }
             },
             ARTSet - u64,
+            MidARTSet - u64,
             LargeARTSet - u64
         );
     }
@@ -957,6 +950,7 @@ mod tests {
                 }
             },
             ARTSet - String,
+            MidARTSet - String,
             LargeARTSet - String
         );
     }

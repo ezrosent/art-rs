@@ -4,12 +4,14 @@ extern crate radix_tree;
 extern crate rand;
 
 use criterion::{Bencher, Criterion, Fun};
-use rand::Rng;
+use rand::{SeedableRng, Rng, StdRng};
 use std::collections::btree_set::BTreeSet;
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use radix_tree::{ARTSet, ArtElement, Digital, LargeARTSet, PrefixCache, RawART};
+use radix_tree::{ARTSet, ArtElement, Digital, LargeARTSet, MidARTSet, PrefixCache, RawART};
+
+const RAND_SEED: [usize; 32] = [0; 32];
 
 /// Barebones set trait to abstract over various collections.
 trait Set<T> {
@@ -67,14 +69,14 @@ impl<T: Ord> Set<T> for BTreeSet<T> {
 }
 
 fn random_vec(len: usize, max_val: u64) -> Vec<u64> {
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     (0..len.next_power_of_two())
         .map(|_| rng.gen_range::<u64>(0, max_val))
         .collect()
 }
 
 fn random_string_vec(max_len: usize, len: usize) -> Vec<String> {
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     (0..len.next_power_of_two())
         .map(|_| {
             let s_len = rng.gen_range::<usize>(0, max_len);
@@ -113,7 +115,7 @@ fn bench_set_rand_int_lookup_in_set<S: Set<u64>>(
 ) {
     set_size = set_size.next_power_of_two();
     let mut s = S::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     let elts: Vec<u64> = (0..set_size)
         .map(|_| rng.gen_range::<u64>(0, max_elt))
         .collect();
@@ -129,7 +131,7 @@ fn bench_set_rand_int_lookup_in_set<S: Set<u64>>(
 }
 
 fn bench_set_rand_string<S: Set<String>>(b: &mut Bencher, mut set_size: usize, max_len: usize) {
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     set_size = set_size.next_power_of_two();
     let elts: Vec<String> = (0..set_size)
         .map(|_| {
@@ -156,7 +158,7 @@ fn bench_set_rand_int_lookup_not_in_set<S: Set<u64>>(
 ) {
     set_size = set_size.next_power_of_two();
     let mut s = S::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     let elts: Vec<u64> = (0..set_size)
         .map(|_| rng.gen_range::<u64>(0, max_elt))
         .collect();
@@ -179,7 +181,7 @@ fn bench_set_rand_int_insert_remove<S: Set<u64>>(
 ) {
     set_size = set_size.next_power_of_two();
     let mut s = S::new();
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     let elts: Vec<u64> = (0..set_size)
         .map(|_| rng.gen_range::<u64>(0, max_elt))
         .collect();
@@ -278,6 +280,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     make_bench::<HashSet<u64>>(c, "Hashtable", &v1s);
     make_bench::<BTreeSet<u64>>(c, "BTree", &v1s);
     make_bench::<ARTSet<u64>>(c, "ART", &v1s);
+    make_bench::<MidARTSet<u64>>(c, "MidART", &v1s);
     make_bench::<LargeARTSet<u64>>(c, "LargeART", &v1s);
 }
 
