@@ -162,7 +162,7 @@ mod dense_hash_set {
     pub struct HashSetPrefixCache<T>(DenseHashTable<MarkedElt<T>>);
     impl<T> PrefixCache<T> for HashSetPrefixCache<T> {
         const ENABLED: bool = true;
-        const COMPLETE: bool = false;
+        const COMPLETE: bool = true;
         fn new(_buckets: usize) -> Self {
             HashSetPrefixCache(DenseHashTable::new())
         }

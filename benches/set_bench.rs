@@ -4,7 +4,7 @@ extern crate radix_tree;
 extern crate rand;
 
 use criterion::{Bencher, Criterion, Fun};
-use rand::{SeedableRng, Rng, StdRng};
+use rand::{Rng, SeedableRng, StdRng};
 use std::collections::btree_set::BTreeSet;
 use std::collections::HashSet;
 use std::hash::Hash;

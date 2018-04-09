@@ -118,16 +118,6 @@ enum PartialDeleteResult<T> {
     Success(T),
 }
 
-// TODO:
-// 1 Use full predicate to avoid unnecessary heap allocation [check]
-// 2 For insertions that create an interior node (case 3 and case 4),
-//   need to insert node into hash table. This can be done by passing a
-//   reference to the function. [check]
-// 3 For removals, any place that removes an interior node (basically
-//   the case when a last is returned) check the old nodes `consumed`
-//   value and remove it from the table if necessary. [half-done]
-// 4 Clean this shit up!
-
 pub struct RawART<T: Element, C: PrefixCache<T>> {
     len: usize,
     root: ChildPtr<T>,
@@ -154,17 +144,24 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         self.len
     }
 
-    fn hash_lookup(&self, digits: &[u8]) -> (bool, Option<MarkedPtr<T>>) {
-        // TODO this has to be modified to signal whether digits has a prefix that is too short, or
-        // if the lookup failed.
-        //
-        // One alternative here is to see if digits can be padded out, or disallowed
-        // - padded out with stop character for things like string
-        // - disallowed for u64, because all "digits" slices are of the same length
+    fn hash_lookup(&self, digits: &[u8]) -> (bool, Option<Result<*mut T, MarkedPtr<T>>>) {
+        // TODO: replace Option<MarkedPtr<T>> with Option<Result<*mut T, MarkedPtr<T>>>
         if digits.len() <= self.prefix_target {
             (false, None)
         } else {
-            (true, self.buckets.lookup(&digits[0..self.prefix_target]))
+            let res = self.buckets.lookup(&digits[0..self.prefix_target]);
+            (
+                true,
+                match res {
+                    Some(ptr) => Some({
+                        match unsafe { ptr.get_raw().unwrap() } {
+                            Ok(leaf) => Ok(leaf),
+                            Err(_) => Err(ptr),
+                        }
+                    }),
+                    None => None,
+                },
+            )
         }
     }
 
@@ -222,7 +219,10 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         if C::ENABLED {
             let (elligible, opt) = self.hash_lookup(digits.as_slice());
             let node_ref = if let Some(ptr) = opt {
-                ptr
+                match ptr {
+                    Ok(leaf) => return Some(leaf),
+                    Err(node) => node,
+                }
             } else if C::COMPLETE && elligible && self.len > 1 {
                 return None;
             } else {
@@ -266,8 +266,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 // want to run its destructor if it has one.
                 //
                 // XXX There must be a better way to do this. Call deallocate directly?
-                use std::mem::ManuallyDrop;
-                let cptr2 = mem::transmute::<ChildPtr<T>, ChildPtr<ManuallyDrop<T>>>(cptr);
+                let cptr2 = mem::transmute::<ChildPtr<T>, ChildPtr<mem::ManuallyDrop<T>>>(cptr);
                 mem::drop(cptr2);
                 res
             }
@@ -284,6 +283,21 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 {
                                     match node.delete(d) {
                                         DeleteResult::Success(deleted) => {
+                                            // we are deleteing an individual node. Time to check
+                                            // if it is in buckets: if it is we should remove it.
+                                            if C::ENABLED && digits.len() >= target
+                                                && consumed <= target
+                                            {
+                                                if C::COMPLETE {
+                                                    debug_assert!(
+                                                        buckets
+                                                            .lookup(&digits[0..target])
+                                                            .is_some()
+                                                    );
+                                                }
+                                                buckets
+                                                    .insert(&digits[0..target], MarkedPtr::null());
+                                            }
                                             (Success(move_val_out(deleted)), None)
                                         }
                                         DeleteResult::Singleton {
@@ -291,6 +305,19 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             last,
                                             last_d,
                                         } => {
+                                            if C::ENABLED && digits.len() >= target
+                                                && consumed <= target
+                                            {
+                                                if C::COMPLETE {
+                                                    debug_assert!(
+                                                        buckets
+                                                            .lookup(&digits[0..target])
+                                                            .is_some()
+                                                    );
+                                                }
+                                                buckets
+                                                    .insert(&digits[0..target], MarkedPtr::null());
+                                            }
                                             debug_assert!(deleted.get().unwrap().is_ok());
                                             (Success(move_val_out(deleted)), Some((last, last_d)))
                                         }
@@ -301,7 +328,16 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             if let Some((mut c_ptr, last_d)) = asgn {
                                 // we are promoting a "last" so we must increase its prefix
                                 // length
-                                let mut switch = false;
+
+
+                                // TODO
+                                //  - validate this logic to make sure that -- even for very long
+                                //    keys -- we get enough digits (up to target) in `ds`
+                                //  - It seems likely that there are cases where `last` nodes are
+                                //    not being inserted into the cache when they should be. Fix
+                                //    that.
+                                let mut switch = false; // flag for inserting a new interior node
+                                // flag for invalidating the cache (as it may contain the node we are deleting)
                                 let mut replace = false;
                                 let mut ds = SmallVec::<[u8; 8]>::new();
                                 {
@@ -451,17 +487,20 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         if C::ENABLED {
             let (elligible, opt) = self.hash_lookup(digits.as_slice());
             res = if let Some(ptr) = opt {
-                delete_raw_recursive(
-                    k,
-                    ptr,
-                    None,
-                    None,
-                    &digits[..],
-                    0,
-                    self.prefix_target,
-                    &mut self.buckets,
-                    false,
-                )
+                match ptr {
+                    Ok(_leaf) => Partial,
+                    Err(inner) => delete_raw_recursive(
+                        k,
+                        inner,
+                        None,
+                        None,
+                        &digits[..],
+                        0,
+                        self.prefix_target,
+                        &mut self.buckets,
+                        false,
+                    ),
+                }
             } else if C::COMPLETE && elligible && self.len > 1 {
                 return None;
             } else {
@@ -512,6 +551,10 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 // Case 1: We found a null pointer, just replace it with a new leaf.
                 let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                 (*pptr.unwrap()) = new_leaf;
+                if C::ENABLED && digits.len() >= target && consumed <= target {
+                    debug_assert!(buckets.lookup(&digits[0..target]).is_none());
+                    buckets.insert(&digits[0..target], (*pptr.unwrap()).to_marked());
+                }
                 return Success;
             }
             match curr.get_raw().unwrap() {
@@ -533,25 +576,30 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                         return Replaced(e);
                     }
                     // found a leaf node, need to split it to a Node4 with two leaves
-                    let mut leaf_digits = SmallVec::<[u8; 32]>::new();
+                    let mut leaf_digits = SmallVec::<[u8; 8]>::new();
                     leaf_digits.extend(leaf_node.key().digits());
-                    // Branch::B1(leaf_digits, e)
                     let pp = pptr.unwrap();
                     let n4: Box<RawNode<Node4<T>>> = make_node_from_common_prefix(
-                        &leaf_digits.as_slice()[consumed..],
+                        &leaf_digits[consumed..],
                         &digits[consumed..],
                         consumed as u32,
                     );
                     let prefix_len = n4.count as usize;
                     let mut n4_raw = Box::into_raw(n4);
                     let mut leaf_ptr = ChildPtr::from_node(n4_raw);
-                    let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
+                    let new_leaf = ChildPtr::from_leaf(Box::into_raw(Box::new(e)));
                     mem::swap(&mut *pp, &mut leaf_ptr);
+
                     if C::ENABLED && consumed <= target
                         && target <= consumed + (*n4_raw).count as usize
                     {
                         buckets.insert(&digits[0..target], (*pp).to_marked());
                         debug_assert!((*pp).get().unwrap().is_err());
+                    } else if C::ENABLED && digits.len() >= target && consumed <= target {
+                        debug_assert!(buckets.lookup(&digits[0..target]).is_none());
+                        buckets.insert(&digits[0..target], new_leaf.to_marked());
+                    } else if leaf_digits.len() >= target && consumed <= target {
+                        debug_assert!(buckets.lookup(&leaf_digits[0..target]).is_some())
                     }
                     // n4_raw has now replaced the leaf, we need to reinsert the leaf, along with
                     // our child pointer.
@@ -563,6 +611,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     (*n4_raw)
                         .insert(leaf_digits[consumed + prefix_len], leaf_ptr, None)
                         .unwrap();
+
                     (*n4_raw)
                         .insert(digits[consumed + prefix_len], new_leaf, None)
                         .unwrap()
@@ -621,12 +670,38 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 return Failure(e);
                             }
                             let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
+                            let m_ptr = c_ptr.to_marked();
                             let _r = nod.insert(d, c_ptr, pptr);
                             debug_assert!(_r.is_ok());
-                            if C::ENABLED && full && nod.consumed as usize <= target
-                                && target <= nod.consumed as usize + nod.count as usize
-                            {
-                                buckets.insert(&digits[0..target], (*pptr.unwrap()).to_marked());
+                            if C::ENABLED {
+                                if nod.consumed as usize <= target
+                                    && target <= nod.consumed as usize + nod.count as usize
+                                {
+                                    if full {
+                                        buckets.insert(
+                                            &digits[0..target],
+                                            (*pptr.unwrap()).to_marked(),
+                                        );
+                                    }
+                                } else if digits.len() >= target && consumed <= target {
+                                    #[cfg(debug_assertions)]
+                                    {
+                                        let elt = buckets.lookup(&digits[0..target]);
+                                        if let Some(ptr) = elt {
+                                            match ptr.get().unwrap() {
+                                                Ok(_leaf) => eprintln!("overwriting leaf node!"),
+                                                Err(other_inner) =>
+                                                    eprintln!("overwriting inner node: {:?} ptr={:?} pptr={:?} inner={:?}",
+                                                              other_inner,
+                                                              ptr,
+                                                              pptr.map(|x| &*x),
+                                                              inn),
+                                            }
+                                            panic!("Overwriting leaf insertion");
+                                        }
+                                    }
+                                    buckets.insert(&digits[0..target], m_ptr);
+                                }
                             }
                             return Success;
                         });
@@ -671,6 +746,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             "Found 0 inner_node.count in split case, matched={:?}",
                             matched
                         );
+
+                        // first make a new node that will be the parent to both `inner` and a leaf
+                        // containing `e`.
                         let common_prefix_digits = &digits[consumed..consumed + matched];
                         debug_assert_eq!(common_prefix_digits.len(), matched);
                         let n4: Box<RawNode<Node4<T>>> =
@@ -680,10 +758,20 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                         consumed += n4.count as usize;
                         let by = matched + 1;
                         adjust_prefix(inner_node, by, min_ref, consumed);
+
+                        // Now allocate a node to contain `e`, insert it into the prefix cache if
+                        // necessary, and insert it into n4.
                         let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
+                        if C::ENABLED && digits.len() >= target && consumed <= target {
+                            debug_assert!(buckets.lookup(&digits[0..target]).is_none());
+                            buckets.insert(&digits[0..target], c_ptr.to_marked());
+                        }
                         let mut n4_raw = Box::into_raw(n4);
                         let _r = (*n4_raw).insert(digits[consumed], c_ptr, None);
                         debug_assert!(_r.is_ok());
+
+                        // Now swap `inner` with n4 (thereby inserting it into the tree) and insert
+                        // `inner` as a child of n4.
                         let pp = pptr.unwrap();
                         let mut n4_cptr = ChildPtr::from_node(n4_raw);
                         mem::swap(&mut *pp, &mut n4_cptr);
@@ -702,8 +790,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         if C::ENABLED {
             let e = {
                 let (node_ref, consumed, pptr) = {
-                    if let Some(ptr) = self.hash_lookup(digits.as_slice()).1 {
-                        (ptr, self.prefix_target, None)
+                    let (_, opt) = self.hash_lookup(digits.as_slice());
+                    if let Some(Err(inner)) = opt {
+                        (inner, self.prefix_target, None)
                     } else {
                         let root_alias = Some(&mut self.root as *mut _);
                         (self.root.to_marked(), 0, root_alias)
@@ -778,6 +867,7 @@ mod tests {
     macro_rules! for_each_set {
         ($s:ident, $body:expr, $( $base:tt - $param:tt),+) => {
             $({
+                eprintln!("Benchmarking {}", stringify!($base));
                 let mut $s = $base::<$param>::new();
                 $body
             };)+
@@ -818,13 +908,18 @@ mod tests {
             s,
             {
                 let mut v1 = random_vec(!0, 1 << 18);
-                for item in v1.iter() {
-                    s.add(*item);
-                    assert!(
-                        s.contains(item),
-                        "lookup failed immediately for {:?}",
-                        DebugVal(*item)
-                    );
+                {
+                    let mut i = 0;
+                    for item in v1.iter() {
+                        s.add(*item);
+                        assert!(
+                            s.contains(item),
+                            "[{:?}] lookup failed immediately for {:?}",
+                            i,
+                            DebugVal(*item)
+                        );
+                        i += 1;
+                    }
                 }
                 let mut missing = Vec::new();
                 for item in v1.iter() {
@@ -851,22 +946,24 @@ mod tests {
                     }
                 }
                 let mut failures = 0;
-                for i in v2.iter() {
-                    let mut fail = 0;
-                    if !s.contains(i) {
-                        eprintln!("{:?} no longer in the set!", DebugVal(*i));
-                        fail = 1;
+                {
+                    let mut ix = 0;
+                    for i in v2.iter() {
+                        let mut fail = 0;
+                        if !s.contains(i) {
+                            eprintln!("[{}] {:?} no longer in the set!", ix, DebugVal(*i));
+                            fail = 1;
+                        }
+                        let res = s.remove(i);
+                        if !res {
+                            fail = 1;
+                        }
+                        if s.contains(i) {
+                            fail = 1;
+                        }
+                        failures += fail;
+                        ix += 1;
                     }
-                    let res = s.remove(i);
-                    if !res {
-                        // eprintln!("Deletion failed at call-site for {:?}", DebugVal(*i));
-                        fail = 1;
-                    }
-                    if s.contains(i) {
-                        // eprintln!("Deletion failed immediately for {:?}", DebugVal(*i));
-                        fail = 1;
-                    }
-                    failures += fail;
                 }
                 assert_eq!(failures, 0);
                 let mut failed = false;
@@ -885,8 +982,8 @@ mod tests {
                     );
                 }
             },
-            ARTSet - u64,
             MidARTSet - u64,
+            ARTSet - u64,
             LargeARTSet - u64
         );
     }
