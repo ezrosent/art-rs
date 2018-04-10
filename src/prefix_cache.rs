@@ -246,17 +246,21 @@ mod dense_hash_set {
         }
 
         fn grow(&mut self) {
-            if self.buckets.len() == 0 {
+            let old_len = if self.buckets.len() == 0 {
                 self.buckets.push(T::null());
                 return;
-            } else {
+            } else if self.buckets.len() < 32 || (self.set as i64) - (self.len as i64) < (self.buckets.len() as i64 / 4) {
+                // actually grow. If this condition is not met, then we just re-hash
                 let l = self.buckets.len();
                 self.buckets.extend((0..l).map(|_| T::null()));
-            }
+                l
+            } else {
+                self.buckets.len()
+            };
             debug_assert!(self.buckets.len().is_power_of_two());
+            debug_assert!(old_len.is_power_of_two());
             let mut v = Vec::with_capacity(self.len);
-            let l = self.buckets.len();
-            for ix in 0..(l / 2) {
+            for ix in 0..old_len {
                 let i = unsafe { self.buckets.get_unchecked_mut(ix) };
                 if i.is_null() {
                     continue;
@@ -269,6 +273,8 @@ mod dense_hash_set {
                 mem::swap(i, &mut t);
                 v.push(t);
             }
+            self.set = 0;
+            self.len = 0;
             for elt in v.into_iter() {
                 let _res = self.insert(elt);
                 debug_assert!(_res.is_ok());

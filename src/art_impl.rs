@@ -145,7 +145,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     }
 
     fn hash_lookup(&self, digits: &[u8]) -> (bool, Option<Result<*mut T, MarkedPtr<T>>>) {
-        // TODO: replace Option<MarkedPtr<T>> with Option<Result<*mut T, MarkedPtr<T>>>
         if digits.len() <= self.prefix_target {
             (false, None)
         } else {
@@ -220,7 +219,11 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             let (elligible, opt) = self.hash_lookup(digits.as_slice());
             let node_ref = if let Some(ptr) = opt {
                 match ptr {
-                    Ok(leaf) => return Some(leaf),
+                    Ok(leaf) => return if (*leaf).matches(k) {
+                        Some(leaf)
+                    } else {
+                        None
+                    },
                     Err(node) => node,
                 }
             } else if C::COMPLETE && elligible && self.len > 1 {
@@ -328,14 +331,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             if let Some((mut c_ptr, last_d)) = asgn {
                                 // we are promoting a "last" so we must increase its prefix
                                 // length
-
-
-                                // TODO
-                                //  - validate this logic to make sure that -- even for very long
-                                //    keys -- we get enough digits (up to target) in `ds`
-                                //  - It seems likely that there are cases where `last` nodes are
-                                //    not being inserted into the cache when they should be. Fix
-                                //    that.
                                 let mut switch = false; // flag for inserting a new interior node
                                 // flag for invalidating the cache (as it may contain the node we are deleting)
                                 let mut replace = false;
@@ -413,13 +408,13 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         // need to construct new digits
                                         d_slice = ds.as_slice();
                                     }
-                                    if switch {
+                                    if switch || replace {
                                         buckets
                                             .insert(&d_slice[0..target], (*parent_ref).to_marked());
-                                        debug_assert!(parent_ref.get().unwrap().is_err());
-                                    } else if replace {
-                                        buckets.insert(&d_slice[0..target], MarkedPtr::null());
                                     }
+                                    // else if replace {
+                                    //     buckets.insert(&d_slice[0..target], MarkedPtr::null());
+                                    // }
                                 }
                             }
                             return res;
@@ -598,7 +593,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     } else if C::ENABLED && digits.len() >= target && consumed <= target {
                         debug_assert!(buckets.lookup(&digits[0..target]).is_none());
                         buckets.insert(&digits[0..target], new_leaf.to_marked());
-                    } else if leaf_digits.len() >= target && consumed <= target {
+                    } else if C::ENABLED && C::COMPLETE && leaf_digits.len() >= target && consumed <= target {
                         debug_assert!(buckets.lookup(&leaf_digits[0..target]).is_some())
                     }
                     // n4_raw has now replaced the leaf, we need to reinsert the leaf, along with
@@ -763,7 +758,14 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                         // necessary, and insert it into n4.
                         let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                         if C::ENABLED && digits.len() >= target && consumed <= target {
-                            debug_assert!(buckets.lookup(&digits[0..target]).is_none());
+                            #[cfg(debug_assertions)]
+                            {
+                                if let Some(ptr) = buckets.lookup(&digits[0..target]) {
+                                    if let Err(inner) =  ptr.get_raw().unwrap() {
+                                        assert_eq!(inner, inn);
+                                    }
+                                }
+                            }
                             buckets.insert(&digits[0..target], c_ptr.to_marked());
                         }
                         let mut n4_raw = Box::into_raw(n4);
@@ -867,7 +869,7 @@ mod tests {
     macro_rules! for_each_set {
         ($s:ident, $body:expr, $( $base:tt - $param:tt),+) => {
             $({
-                eprintln!("Benchmarking {}", stringify!($base));
+                // eprintln!("Benchmarking {}", stringify!($base));
                 let mut $s = $base::<$param>::new();
                 $body
             };)+
@@ -956,9 +958,11 @@ mod tests {
                         }
                         let res = s.remove(i);
                         if !res {
+                            eprintln!("[{}] Failed to remove {:?}!", ix, DebugVal(*i));
                             fail = 1;
                         }
                         if s.contains(i) {
+                            eprintln!("[{}] {:?} still in the set after removal!", ix, DebugVal(*i));
                             fail = 1;
                         }
                         failures += fail;
