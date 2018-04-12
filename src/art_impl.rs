@@ -412,9 +412,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         buckets
                                             .insert(&d_slice[0..target], (*parent_ref).to_marked());
                                     }
-                                    // else if replace {
-                                    //     buckets.insert(&d_slice[0..target], MarkedPtr::null());
-                                    // }
                                 }
                             }
                             return res;
@@ -465,10 +462,10 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     }
                 })
             } else if let Some(cp) = curr_ptr {
-                // we are in the root, set curr to null.
                 if !is_root {
                     return Partial;
                 }
+                // we are in the root, set curr to null.
                 let c_ptr = cp.swap_null();
                 if C::ENABLED {
                     buckets.insert(&digits[0..target], MarkedPtr::null());

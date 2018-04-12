@@ -285,6 +285,9 @@ pub trait Node<T: Element>: Sized {
         self.find_raw(d).map(|raw_ptr| unsafe { &mut *raw_ptr })
     }
 
+    // iterate over all non-null direct children of the node.
+    fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, f: F);
+
     fn for_each<F: FnMut(&T)>(
         &self,
         f: &mut F,
@@ -563,6 +566,18 @@ mod node_variants {
         }};
     }
 
+    macro_rules! n416_local_foreach {
+        ($slf: expr, $f: expr) => {{
+            debug_assert!(is_sorted(&$slf.node.keys[..$slf.children as usize]));
+            let children = $slf.children as usize;
+            for i in 0..children {
+                let k = $slf.node.keys[i];
+                let ptr = &$slf.node.ptrs[i];
+                debug_assert!(!ptr.is_null());
+                $f(k, unsafe { ptr.to_marked() });
+            }
+        }};
+    }
     impl<T> RawNode<Node4<T>> {
         fn find_internal(&self, d: u8) -> Option<(usize, *mut ChildPtr<T>)> {
             debug_assert!(self.children <= 4);
@@ -587,6 +602,10 @@ mod node_variants {
 
         unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> {
             n416_delete!(self, d)
+        }
+
+        fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, mut f: F) {
+            n416_local_foreach!(self, f)
         }
 
         fn get_min(&self) -> Option<&T> {
@@ -723,6 +742,10 @@ mod node_variants {
         }
         fn find_raw(&self, d: u8) -> Option<*mut ChildPtr<T>> {
             self.find_internal(d).map(|(_, ptr)| ptr)
+        }
+
+        fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, mut f: F) {
+            n416_local_foreach!(self, f)
         }
 
         unsafe fn delete(&mut self, d: u8) -> DeleteResult<T> {
@@ -893,6 +916,20 @@ mod node_variants {
             }
         }
 
+        fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, mut f: F) {
+            for d in 0..256 {
+                let i = self.node.keys[d];
+                if i == 0 { continue; }
+                let ix = i as usize - 1;
+                let ptr = &self.node.ptrs[ix];
+                unsafe {
+                    debug_assert!(!ptr.is_null());
+                    debug_assert!(d < 256);
+                    f(d as u8, ptr.to_marked())
+                };
+            }
+        }
+
         fn get_min(&self) -> Option<&T> {
             self.state_valid();
             unsafe {
@@ -1044,6 +1081,18 @@ mod node_variants {
 
         fn is_full(&self) -> bool {
             self.children == 256
+        }
+
+        fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, mut f: F) {
+            for d in 0..256 {
+                unsafe {
+                    let ptr =  self.node.ptrs.get_unchecked(d);
+                    if ptr.is_null() {
+                        continue;
+                    }
+                    f(d as u8, ptr.to_marked());
+                }
+            }
         }
 
         fn get_min(&self) -> Option<&T> {
