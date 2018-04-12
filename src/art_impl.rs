@@ -300,6 +300,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                                 }
                                                 buckets
                                                     .insert(&digits[0..target], MarkedPtr::null());
+                                            } else if C::ENABLED && digits.len() >= target {
+                                                debug_assert!(buckets.lookup(&digits[0..target]).is_none());
                                             }
                                             (Success(move_val_out(deleted)), None)
                                         }
@@ -320,6 +322,18 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                                 }
                                                 buckets
                                                     .insert(&digits[0..target], MarkedPtr::null());
+                                            }
+                                            if C::ENABLED {
+                                                if let Ok(_leaf) = last.get().unwrap() {
+                                                    let mut leaf_digits = SmallVec::<[u8; 8]>::new();
+                                                    let leaf: &T = _leaf;
+                                                    leaf_digits.extend(leaf.key().digits());
+                                                    if leaf_digits.len() >= target && consumed <= target + 1 {
+                                                        buckets.insert(&leaf_digits[..target], last.to_marked());
+                                                    } else if leaf_digits.len() >= target {
+                                                        debug_assert!(buckets.lookup(&leaf_digits[0..target]).is_none());
+                                                    }
+                                                }
                                             }
                                             debug_assert!(deleted.get().unwrap().is_ok());
                                             (Success(move_val_out(deleted)), Some((last, last_d)))
@@ -467,7 +481,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 }
                 // we are in the root, set curr to null.
                 let c_ptr = cp.swap_null();
-                if C::ENABLED {
+                if C::ENABLED && digits.len() >= target {
                     buckets.insert(&digits[0..target], MarkedPtr::null());
                 }
                 Success(move_val_out(c_ptr))
@@ -589,8 +603,14 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                         debug_assert!((*pp).get().unwrap().is_err());
                     } else if C::ENABLED && digits.len() >= target && consumed <= target {
                         debug_assert!(buckets.lookup(&digits[0..target]).is_none());
-                        buckets.insert(&digits[0..target], new_leaf.to_marked());
-                    } else if C::ENABLED && C::COMPLETE && leaf_digits.len() >= target && consumed <= target {
+                        buckets.insert(&digits[0..target], (*pp).to_marked());
+                        // buckets.insert(&digits[0..target], new_leaf.to_marked());
+                    }
+
+                    if C::ENABLED && leaf_digits.len() >= target && consumed <= target {
+                        buckets.insert(&leaf_digits[0..target], (*pp).to_marked());
+                    }
+                    if C::ENABLED && C::COMPLETE && leaf_digits.len() >= target && consumed <= target {
                         debug_assert!(buckets.lookup(&leaf_digits[0..target]).is_some())
                     }
                     // n4_raw has now replaced the leaf, we need to reinsert the leaf, along with
@@ -662,7 +682,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 return Failure(e);
                             }
                             let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
-                            let m_ptr = c_ptr.to_marked();
                             let _r = nod.insert(d, c_ptr, pptr);
                             debug_assert!(_r.is_ok());
                             if C::ENABLED {
@@ -670,16 +689,16 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                     && target <= nod.consumed as usize + nod.count as usize
                                 {
                                     if full {
+                                        let marked_p = (*pptr.unwrap()).to_marked();
                                         buckets.insert(
                                             &digits[0..target],
-                                            (*pptr.unwrap()).to_marked(),
+                                            marked_p.clone(),
                                         );
                                     }
-                                } else if digits.len() >= target && consumed <= target {
+                                } else if digits.len() >= target && consumed <= target && !full {
                                     #[cfg(debug_assertions)]
                                     {
-                                        let elt = buckets.lookup(&digits[0..target]);
-                                        if let Some(ptr) = elt {
+                                        if let Some(ptr) = buckets.lookup(&digits[0..target]) {
                                             match ptr.get().unwrap() {
                                                 Ok(_leaf) => eprintln!("overwriting leaf node!"),
                                                 Err(other_inner) =>
@@ -692,7 +711,25 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             panic!("Overwriting leaf insertion");
                                         }
                                     }
-                                    buckets.insert(&digits[0..target], m_ptr);
+                                    buckets.insert(&digits[0..target], MarkedPtr::from_node(nod));
+                                } else if full && consumed <= target {
+                                    let marked_p = (*pptr.unwrap()).to_marked();
+                                    // If we were full we have to remap all leaves that are
+                                    // children of nod to the new value.
+                                    let mut mp = marked_p.clone();
+                                    let new_nod = mp.get_mut().unwrap().err().unwrap();
+                                    with_node_mut!(new_nod, nod, {
+                                        nod.local_foreach(|_, n| {
+                                            if let Ok(leaf) = n.get().unwrap() {
+                                                let mut ds = SmallVec::<[u8; 8]>::new();
+                                                ds.extend(leaf.key().digits());
+                                                if ds.len() < target {
+                                                    return;
+                                                }
+                                                buckets.insert(&ds[..target], marked_p.clone());
+                                            }
+                                        });
+                                    }, T);
                                 }
                             }
                             return Success;
@@ -754,31 +791,22 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                         // Now allocate a node to contain `e`, insert it into the prefix cache if
                         // necessary, and insert it into n4.
                         let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
-                        if C::ENABLED && digits.len() >= target && consumed <= target {
-                            #[cfg(debug_assertions)]
-                            {
-                                if let Some(ptr) = buckets.lookup(&digits[0..target]) {
-                                    if let Err(inner) =  ptr.get_raw().unwrap() {
-                                        assert_eq!(inner, inn);
-                                    }
-                                }
-                            }
-                            buckets.insert(&digits[0..target], c_ptr.to_marked());
-                        }
+
                         let mut n4_raw = Box::into_raw(n4);
                         let _r = (*n4_raw).insert(digits[consumed], c_ptr, None);
                         debug_assert!(_r.is_ok());
-
+                        let mut n4_cptr = ChildPtr::from_node(n4_raw);
                         // Now swap `inner` with n4 (thereby inserting it into the tree) and insert
                         // `inner` as a child of n4.
                         let pp = pptr.unwrap();
-                        let mut n4_cptr = ChildPtr::from_node(n4_raw);
                         mem::swap(&mut *pp, &mut n4_cptr);
                         if C::ENABLED && consumed <= target
                             && target <= consumed + (*n4_raw).count as usize
                         {
                             buckets.insert(&digits[0..target], (*pp).to_marked());
                             debug_assert!((*pp).get().unwrap().is_err());
+                        } else if C::ENABLED && digits.len() >= target && consumed <= target {
+                            buckets.insert(&digits[0..target], (*pp).to_marked());
                         }
                         (*n4_raw).insert(inner_d, n4_cptr, None).unwrap()
                     }
@@ -866,7 +894,7 @@ mod tests {
     macro_rules! for_each_set {
         ($s:ident, $body:expr, $( $base:tt - $param:tt),+) => {
             $({
-                // eprintln!("Benchmarking {}", stringify!($base));
+                eprintln!("Testing {}", stringify!($base));
                 let mut $s = $base::<$param>::new();
                 $body
             };)+

@@ -18,7 +18,13 @@ pub trait PrefixCache<T> {
     const COMPLETE: bool;
     fn new(buckets: usize) -> Self;
     fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>>;
-    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>);
+    fn replace(&mut self, bs: &[u8], ptr: MarkedPtr<T>) -> Option<MarkedPtr<T>> {
+        self.insert(bs, ptr);
+        None
+    }
+    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
+        let _ = self.replace(bs, ptr);
+    }
 }
 pub struct NullBuckets<T>(PhantomData<T>);
 
@@ -168,19 +174,41 @@ mod dense_hash_set {
         }
         fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>> {
             let prefix = HashBuckets::<T>::read_u64(bs);
-            self.0.lookup(&prefix).map(|elt| elt.ptr.clone())
+            let res = self.0.lookup(&prefix).map(|elt| elt.ptr.clone());
+            #[cfg(debug_assertions)]
+            unsafe {
+                if let Some(Err(inner)) = res.as_ref().map(|x| x.get().expect("stored pointer should be non-null")) {
+                    assert!(inner.children != !0, "Returning an expired node {:?} (ty={:?})", res, inner.typ);
+                }
+            }
+            res
         }
 
         fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
             let prefix = HashBuckets::<T>::read_u64(bs);
             if ptr.is_null() {
-                let _ = self.0.delete(&prefix);
+                self.0.delete(&prefix);
             } else {
-                let _ = self.0.insert(MarkedElt {
+                let _ =  self.0.insert(MarkedElt {
                     prefix: prefix,
                     ptr: ptr,
                 });
             }
+        }
+
+        fn replace(&mut self, bs: &[u8], ptr: MarkedPtr<T>) -> Option<MarkedPtr<T>> {
+            let prefix = HashBuckets::<T>::read_u64(bs);
+            if ptr.is_null() {
+                self.0.delete(&prefix)
+            } else {
+                match self.0.insert(MarkedElt {
+                    prefix: prefix,
+                    ptr: ptr,
+                }) {
+                    Ok(()) => None,
+                    Err(t) => Some(t),
+                }
+            }.map(|t| t.ptr)
         }
     }
 
@@ -237,6 +265,11 @@ mod dense_hash_set {
     where
         T::Key: Eq + Hash,
     {
+
+        fn next_probe(hash: usize, i: usize) -> usize {
+            hash + (i + i * i)/2
+        }
+
         fn new() -> Self {
             DenseHashTable {
                 buckets: Vec::new(),
@@ -246,6 +279,7 @@ mod dense_hash_set {
         }
 
         fn grow(&mut self) {
+            debug_assert!(self.set >= self.len);
             let old_len = if self.buckets.len() == 0 {
                 self.buckets.push(T::null());
                 return;
@@ -300,7 +334,7 @@ mod dense_hash_set {
                     return None;
                 }
                 if bucket.is_tombstone() || bucket.key() != k {
-                    ix = hash + times * times;
+                    ix = Self::next_probe(hash, times);
                     ix &= self.buckets.len() - 1;
                     continue;
                 }
@@ -326,7 +360,7 @@ mod dense_hash_set {
                     return None;
                 }
                 if bucket.is_tombstone() || bucket.key() != k {
-                    ix = hash + times * times;
+                    ix = Self::next_probe(hash, times);
                     ix &= l - 1;
                     continue;
                 }
@@ -339,28 +373,30 @@ mod dense_hash_set {
         }
 
         fn insert(&mut self, mut t: T) -> Result<(), T> {
-            if self.set >= self.buckets.len() >> 1 {
+            if self.set >= self.buckets.len()/2 {
                 self.grow();
             }
             debug_assert!(!t.is_null());
             debug_assert!(!t.is_tombstone());
+            let l = self.buckets.len();
             let hash = {
                 let mut hasher = FnvHasher::default();
                 t.key().hash(&mut hasher);
-                (hasher.finish() & (self.buckets.len() as u64 - 1)) as usize
+                (hasher.finish() & (l as u64 - 1)) as usize
             };
             let mut ix = hash;
             let mut times = 0;
-            let l = self.buckets.len();
             while times < l {
                 debug_assert_eq!(l, self.buckets.len());
                 debug_assert!(ix < self.buckets.len());
                 times += 1;
                 let bucket = unsafe { self.buckets.get_unchecked_mut(ix) };
                 if bucket.is_null() || bucket.is_tombstone() {
+                    if bucket.is_null() {
+                        self.set += 1;
+                    }
                     mem::swap(bucket, &mut t);
                     self.len += 1;
-                    self.set += 1;
                     return Ok(());
                 }
                 if bucket.key() == t.key() {
@@ -368,15 +404,23 @@ mod dense_hash_set {
                     return Err(t);
                 }
 
-                ix = hash + times * times;
+                ix = Self::next_probe(hash, times);
                 ix &= l - 1;
             }
+            #[cfg(debug_assertions)]
+            {
+                for i in 0..l {
+                    let b = &self.buckets[i];
+                    eprintln!("[{}] {}", i, if b.is_null() { "null" } else if b.is_tombstone() { "tombstone" } else { "Node" } );
+                }
+            }
             panic!(
-                "table too small! blen={}, set={}, len={}, l={}",
+                "table too small! blen={}, set={}, len={}, l={} hash={}",
                 self.buckets.len(),
                 self.set,
                 self.len,
-                l
+                l,
+                hash
             )
         }
     }

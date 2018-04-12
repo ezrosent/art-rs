@@ -102,7 +102,7 @@ impl<T> MarkedPtr<T> {
         MarkedPtr(0, PhantomData)
     }
 
-    fn from_node<R>(p: *mut RawNode<R>) -> Self {
+    pub fn from_node<R>(p: *mut RawNode<R>) -> Self {
         debug_assert!(!p.is_null());
         MarkedPtr(p as usize, PhantomData)
     }
@@ -177,7 +177,7 @@ mod place_test {
 #[derive(Debug)]
 pub struct RawNode<Footer> {
     pub typ: NodeType,
-    children: u16,
+    pub children: u16,
     pub count: u32,
     pub consumed: u32,
     pub prefix: [u8; PREFIX_LEN],
@@ -207,6 +207,7 @@ impl RawNode<()> {
         consumed: usize,
         _marker: PhantomData<T>,
     ) -> (usize, Option<*const T>) {
+        debug_assert!(consumed < digits.len());
         let count = cmp::min(self.count as usize, PREFIX_LEN);
         for i in 0..count {
             if digits[consumed + i] != self.prefix[i] {
@@ -282,7 +283,12 @@ pub trait Node<T: Element>: Sized {
         self.find_raw(d).map(|raw_ptr| unsafe { &*raw_ptr })
     }
     fn find_mut(&self, d: u8) -> Option<&mut ChildPtr<T>> {
-        self.find_raw(d).map(|raw_ptr| unsafe { &mut *raw_ptr })
+        self.find_raw(d).map(|raw_ptr| {
+            unsafe {
+                debug_assert!(!(*raw_ptr).is_null());
+                &mut *raw_ptr
+            }
+        })
     }
 
     // iterate over all non-null direct children of the node.
@@ -587,6 +593,8 @@ mod node_variants {
                 }
                 if self.node.keys[i] == d {
                     unsafe {
+                        debug_assert!(!self.node.ptrs[i].is_null(), "keys={:?} ptrs={:?}",
+                            &self.node.keys[..], &self.node.ptrs[..]);
                         return Some((i, self.node.ptrs.get_unchecked(i) as *const _ as *mut _));
                     };
                 }
@@ -648,6 +656,10 @@ mod node_variants {
                     }));
                     ptr::swap_nonoverlapping(&mut self.node.keys[0], &mut new_node.node.keys[0], 4);
                     ptr::swap_nonoverlapping(&mut self.node.ptrs[0], &mut new_node.node.ptrs[0], 4);
+                    #[cfg(debug_assertions)]
+                    {
+                        self.children = !0;
+                    }
                     let new_cptr = ChildPtr::from_node(new_node);
                     *pp = new_cptr;
                     let res = new_node.insert(d, ptr, None);
@@ -709,6 +721,7 @@ mod node_variants {
 
     impl<T> RawNode<Node16<T>> {
         fn find_internal(&self, d: u8) -> Option<(usize, *mut ChildPtr<T>)> {
+            debug_assert!(self.children != !0, "This node has been upgraded");
             let mask = (1 << (self.children as usize)) - 1;
             #[cfg(all(any(target_arch = "x86_64", target_arch = "x86"), target_feature = "sse2"))]
             {
@@ -722,6 +735,8 @@ mod node_variants {
                     debug_assert_eq!(bits.count_ones(), 1);
                     let target = bits.trailing_zeros() as usize;
                     debug_assert!(target < 16);
+                    debug_assert!(!self.node.ptrs[target].is_null(),
+                                  "children={} keys={:?} ptrs={:?}", self.children, &self.node.keys[..], &self.node.ptrs[..]);
                     Some((target, unsafe {
                         self.node.ptrs.get_unchecked(target) as *const _ as *mut _
                     }))
@@ -795,6 +810,10 @@ mod node_variants {
                             new_node.node.ptrs.get_unchecked_mut(i),
                         );
                         new_node.node.keys[ix] = i as u8 + 1;
+                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        self.children = !0;
                     }
                     let new_cptr = ChildPtr::from_node(new_node);
                     *pp = new_cptr;
@@ -911,6 +930,7 @@ mod node_variants {
                 None
             } else {
                 unsafe {
+                    debug_assert!(!self.node.ptrs[ix-1].is_null());
                     Some(self.node.ptrs.get_unchecked(ix - 1) as *const _ as *mut ChildPtr<T>)
                 }
             }
@@ -997,6 +1017,10 @@ mod node_variants {
                             debug_assert!(i != d as usize, "{:?} == {:?}", i, d);
                             mem::swap(&mut *node_ptr, new_node.node.ptrs.get_unchecked_mut(i))
                         }
+                    }
+                    #[cfg(debug_assertions)]
+                    {
+                        self.children = !0;
                     }
                     let new_cptr = ChildPtr::from_node(new_node);
                     *pp = new_cptr;
