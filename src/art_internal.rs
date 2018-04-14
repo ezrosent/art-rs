@@ -19,12 +19,13 @@ pub struct MarkedPtr<T>(usize, PhantomData<T>);
 pub use self::node_variants::{NODE_16, NODE_256, NODE_4, NODE_48, Node16, Node256, Node48,
                               NodeType};
 
-
 impl<T> PartialEq for MarkedPtr<T> {
-    fn eq(&self, other: &MarkedPtr<T>) -> bool { self.0 == other.0 }
+    fn eq(&self, other: &MarkedPtr<T>) -> bool {
+        self.0 == other.0
+    }
 }
 
-impl<T> Eq for MarkedPtr<T> { }
+impl<T> Eq for MarkedPtr<T> {}
 
 pub trait Element {
     type Key: for<'a> Digital<'a> + PartialOrd;
@@ -71,11 +72,15 @@ impl<T> Drop for ChildPtr<T> {
 impl<T> ::std::fmt::Debug for MarkedPtr<T> {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
         unsafe {
-            write!(f, "MarkedPtr({})", match self.get_raw() {
-                None => String::from("null"),
-                Some(Ok(leaf_ptr)) => format!("leaf:{:?}", leaf_ptr),
-                Some(Err(inner)) => format!("inner:{:?}", *inner),
-            })
+            write!(
+                f,
+                "MarkedPtr({})",
+                match self.get_raw() {
+                    None => String::from("null"),
+                    Some(Ok(leaf_ptr)) => format!("leaf:{:?}", leaf_ptr),
+                    Some(Err(inner)) => format!("inner:{:?}", *inner),
+                }
+            )
         }
     }
 }
@@ -296,11 +301,9 @@ pub trait Node<T: Element>: Sized {
         self.find_raw(d).map(|raw_ptr| unsafe { &*raw_ptr })
     }
     fn find_mut(&self, d: u8) -> Option<&mut ChildPtr<T>> {
-        self.find_raw(d).map(|raw_ptr| {
-            unsafe {
-                debug_assert!(!(*raw_ptr).is_null());
-                &mut *raw_ptr
-            }
+        self.find_raw(d).map(|raw_ptr| unsafe {
+            debug_assert!(!(*raw_ptr).is_null());
+            &mut *raw_ptr
         })
     }
 
@@ -533,7 +536,12 @@ mod node_variants {
                     );
                     if $slf.children == 1 {
                         let mut c_ptr = ChildPtr::null();
-                        debug_assert!(!$slf.node.ptrs[0].is_null(), "{:?} Uh oh! {:?}", $slf as *const _, $slf);
+                        debug_assert!(
+                            !$slf.node.ptrs[0].is_null(),
+                            "{:?} Uh oh! {:?}",
+                            $slf as *const _,
+                            $slf
+                        );
                         mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
                         DeleteResult::Singleton {
                             deleted: deleted,
@@ -750,8 +758,13 @@ mod node_variants {
                     debug_assert_eq!(bits.count_ones(), 1);
                     let target = bits.trailing_zeros() as usize;
                     debug_assert!(target < 16);
-                    debug_assert!(!self.node.ptrs[target].is_null(),
-                                  "children={} keys={:?} ptrs={:?}", self.children, &self.node.keys[..], &self.node.ptrs[..]);
+                    debug_assert!(
+                        !self.node.ptrs[target].is_null(),
+                        "children={} keys={:?} ptrs={:?}",
+                        self.children,
+                        &self.node.keys[..],
+                        &self.node.ptrs[..]
+                    );
                     Some((target, unsafe {
                         self.node.ptrs.get_unchecked(target) as *const _ as *mut _
                     }))
@@ -945,7 +958,7 @@ mod node_variants {
                 None
             } else {
                 unsafe {
-                    debug_assert!(!self.node.ptrs[ix-1].is_null());
+                    debug_assert!(!self.node.ptrs[ix - 1].is_null());
                     Some(self.node.ptrs.get_unchecked(ix - 1) as *const _ as *mut ChildPtr<T>)
                 }
             }
@@ -954,7 +967,9 @@ mod node_variants {
         fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, mut f: F) {
             for d in 0..256 {
                 let i = self.node.keys[d];
-                if i == 0 { continue; }
+                if i == 0 {
+                    continue;
+                }
                 let ix = i as usize - 1;
                 let ptr = &self.node.ptrs[ix];
                 unsafe {
@@ -1125,7 +1140,7 @@ mod node_variants {
         fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, mut f: F) {
             for d in 0..256 {
                 unsafe {
-                    let ptr =  self.node.ptrs.get_unchecked(d);
+                    let ptr = self.node.ptrs.get_unchecked(d);
                     if ptr.is_null() {
                         continue;
                     }

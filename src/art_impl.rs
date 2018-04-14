@@ -219,11 +219,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             let (elligible, opt) = self.hash_lookup(digits.as_slice());
             let node_ref = if let Some(ptr) = opt {
                 match ptr {
-                    Ok(leaf) => return if (*leaf).matches(k) {
-                        Some(leaf)
-                    } else {
-                        None
-                    },
+                    Ok(leaf) => return if (*leaf).matches(k) { Some(leaf) } else { None },
                     Err(node) => node,
                 }
             } else if C::COMPLETE && elligible && self.len > 1 {
@@ -267,8 +263,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 };
                 // Now we want to deallocate the memory that once held the element, but we don't
                 // want to run its destructor if it has one.
-                //
-                // XXX There must be a better way to do this. Call deallocate directly?
                 let cptr2 = mem::transmute::<ChildPtr<T>, ChildPtr<mem::ManuallyDrop<T>>>(cptr);
                 mem::drop(cptr2);
                 res
@@ -280,7 +274,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     if leaf_node.matches(k) {
                         // we have a match! delete the leaf
                         if let Some((d, parent_ref)) = parent {
-                            let marked_p = parent_ref.to_marked();
                             let (res, asgn) = with_node_mut!(
                                 parent_ref.get_mut().unwrap().err().unwrap(),
                                 node,
@@ -301,10 +294,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                                 }
                                                 buckets
                                                     .insert(&digits[0..target], MarkedPtr::null());
-                                            } else if C::ENABLED && digits.len() >= target {
-                                                debug_assert!(buckets.lookup(&digits[0..target]).is_none(),
-                                                    "{:?} should be None (prefix={:?})",
-                                                    buckets.lookup(&digits[0..target]), &digits[0..target]);
                                             }
                                             (Success(move_val_out(deleted)), None)
                                         }
@@ -328,15 +317,33 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             }
                                             if C::ENABLED {
                                                 if let Ok(_leaf) = last.get().unwrap() {
-                                                    let mut leaf_digits = SmallVec::<[u8; 8]>::new();
+                                                    let mut leaf_digits =
+                                                        SmallVec::<[u8; 8]>::new();
                                                     let leaf: &T = _leaf;
                                                     leaf_digits.extend(leaf.key().digits().take(8));
-                                                    if leaf_digits.len() >= target && consumed <= target {
-                                                        buckets.insert(&leaf_digits[0..target], last.to_marked());
-                                                        debug_assert_eq!(buckets.lookup(&leaf_digits[0..target]), Some(last.to_marked()));
-                                                        eprintln!("Remapping digits {:?} while deleting {:?}",
-                                                                  &leaf_digits[..], &digits[..]);
-                                                        buckets.debug_assert_unreachable(marked_p);
+                                                    if leaf_digits.len() >= target
+                                                        && consumed <= target
+                                                    {
+                                                        buckets.insert(
+                                                            &leaf_digits[0..target],
+                                                            last.to_marked(),
+                                                        );
+                                                        debug_assert_eq!(
+                                                            buckets.lookup(&leaf_digits[0..target]),
+                                                            Some(last.to_marked())
+                                                        );
+                                                        // N.B. when debugging deletes, consider
+                                                        // this extra consistency check. This is
+                                                        // off by default because it does an O(n)
+                                                        // scan of `buckets` which slows things
+                                                        // down considerably on debug builds.
+                                                        //
+                                                        // // this declaration needs to be moved up
+                                                        // // a few blocks
+                                                        // let marked_p = parent_ref.to_marked();
+                                                        // eprintln!("Remapping digits {:?} while deleting {:?}",
+                                                        //           &leaf_digits[..], &digits[..]);
+                                                        // buckets.debug_assert_unreachable(marked_p);
                                                     }
                                                 }
                                             }
@@ -351,6 +358,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 // we are promoting a "last" so we must increase its prefix
                                 // length
                                 let mut switch = false; // flag for inserting a new interior node
+
                                 // flag for invalidating the cache (as it may contain the node we are deleting)
                                 let mut replace = false;
                                 let mut ds = SmallVec::<[u8; 8]>::new();
@@ -374,8 +382,10 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                                 ds.push(*dd)
                                             }
                                         }
-                                    } else if C::ENABLED {
-                                        debug_assert!(buckets.lookup(&digits[0..target]) != Some(_p_marked));
+                                    } else if C::ENABLED && digits.len() >= target {
+                                        debug_assert!(
+                                            buckets.lookup(&digits[0..target]) != Some(_p_marked)
+                                        );
                                     }
                                     if let Err(inner) = c_ptr.get_mut().unwrap() {
                                         // The "last" node that we are promoting is an interior
@@ -618,7 +628,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     if C::ENABLED && leaf_digits.len() >= target && consumed <= target {
                         buckets.insert(&leaf_digits[0..target], (*pp).to_marked());
                     }
-                    if C::ENABLED && C::COMPLETE && leaf_digits.len() >= target && consumed <= target {
+                    if C::ENABLED && C::COMPLETE && leaf_digits.len() >= target
+                        && consumed <= target
+                    {
                         debug_assert!(buckets.lookup(&leaf_digits[0..target]).is_some())
                     }
                     // n4_raw has now replaced the leaf, we need to reinsert the leaf, along with
@@ -698,10 +710,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 {
                                     if full {
                                         let marked_p = (*pptr.unwrap()).to_marked();
-                                        buckets.insert(
-                                            &digits[0..target],
-                                            marked_p.clone(),
-                                        );
+                                        buckets.insert(&digits[0..target], marked_p.clone());
                                     }
                                 } else if digits.len() >= target && consumed <= target && !full {
                                     #[cfg(debug_assertions)]
@@ -726,18 +735,24 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                     // children of nod to the new value.
                                     let mut mp = marked_p.clone();
                                     let new_nod = mp.get_mut().unwrap().err().unwrap();
-                                    with_node_mut!(new_nod, nod, {
-                                        nod.local_foreach(|_, n| {
-                                            if let Ok(leaf) = n.get().unwrap() {
-                                                let mut ds = SmallVec::<[u8; 8]>::new();
-                                                ds.extend(leaf.key().digits());
-                                                if ds.len() < target {
-                                                    return;
+                                    with_node_mut!(
+                                        new_nod,
+                                        nod,
+                                        {
+                                            nod.local_foreach(|_, n| {
+                                                if let Ok(leaf) = n.get().unwrap() {
+                                                    let mut ds = SmallVec::<[u8; 8]>::new();
+                                                    ds.extend(leaf.key().digits());
+                                                    if ds.len() < target {
+                                                        return;
+                                                    }
+                                                    buckets
+                                                        .insert(&ds[0..target], marked_p.clone());
                                                 }
-                                                buckets.insert(&ds[0..target], marked_p.clone());
-                                            }
-                                        });
-                                    }, T);
+                                            });
+                                        },
+                                        T
+                                    );
                                 }
                             }
                             return Success;
@@ -995,7 +1010,11 @@ mod tests {
                             fail = 1;
                         }
                         if s.contains(i) {
-                            eprintln!("[{}] {:?} still in the set after removal!", ix, DebugVal(*i));
+                            eprintln!(
+                                "[{}] {:?} still in the set after removal!",
+                                ix,
+                                DebugVal(*i)
+                            );
                             fail = 1;
                         }
                         failures += fail;

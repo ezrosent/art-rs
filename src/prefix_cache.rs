@@ -109,17 +109,23 @@ impl<T> PrefixCache<T> for HashBuckets<T> {
         let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
         if ptr.is_null() {
             #[cfg(feature = "print_cache_stats")]
-            unsafe { *self.misses.get() += 1 };
+            unsafe {
+                *self.misses.get() += 1
+            };
             None
         } else {
             let key = Self::read_u64(bs);
             if key == i {
                 #[cfg(feature = "print_cache_stats")]
-                unsafe { *self.hits.get() += 1 };
+                unsafe {
+                    *self.hits.get() += 1
+                };
                 Some(ptr)
             } else {
                 #[cfg(feature = "print_cache_stats")]
-                unsafe { *self.collisions.get() += 1 };
+                unsafe {
+                    *self.collisions.get() += 1
+                };
                 None
             }
         }
@@ -164,7 +170,6 @@ mod dense_hash_set {
     use super::*;
     use super::fnv::FnvHasher;
 
-    #[cfg(debug_assertions)]
     use super::super::Digital;
     use std::hash::{Hash, Hasher};
     use std::mem;
@@ -181,13 +186,21 @@ mod dense_hash_set {
         fn debug_assert_unreachable(&self, ptr: MarkedPtr<T>) {
             for elt in self.0.buckets.iter() {
                 if elt.ptr == ptr {
-                    assert!(self.0.lookup(&elt.prefix).is_some(), "attempted to look up {:?}:{:?} but failed",
-                            elt.prefix, elt.ptr);
+                    assert!(
+                        self.0.lookup(&elt.prefix).is_some(),
+                        "attempted to look up {:?}:{:?} but failed",
+                        elt.prefix,
+                        elt.ptr
+                    );
                     let l = self.0.lookup(&elt.prefix).unwrap();
                     assert!(l.ptr == elt.ptr, "got {:?} != elt {:?}", l, elt);
-                    assert!(elt.ptr != ptr,
-                            "Found ptr {:?} in elt with prefix {:?} [{:?}]",
-                            ptr, elt.prefix, elt.prefix.digits().collect::<Vec<u8>>().as_slice())
+                    assert!(
+                        elt.ptr != ptr,
+                        "Found ptr {:?} in elt with prefix {:?} [{:?}]",
+                        ptr,
+                        elt.prefix,
+                        elt.prefix.digits().collect::<Vec<u8>>().as_slice()
+                    )
                 }
             }
         }
@@ -197,8 +210,15 @@ mod dense_hash_set {
             let res = self.0.lookup(&prefix).map(|elt| elt.ptr.clone());
             #[cfg(debug_assertions)]
             unsafe {
-                if let Some(Err(inner)) = res.as_ref().map(|x| x.get().expect("stored pointer should be non-null")) {
-                    assert!(inner.children != !0, "Returning an expired node {:?} (ty={:?})", res, inner.typ);
+                if let Some(Err(inner)) = res.as_ref()
+                    .map(|x| x.get().expect("stored pointer should be non-null"))
+                {
+                    assert!(
+                        inner.children != !0,
+                        "Returning an expired node {:?} (ty={:?})",
+                        res,
+                        inner.typ
+                    );
                 }
             }
             res
@@ -210,7 +230,7 @@ mod dense_hash_set {
                 self.0.delete(&prefix);
                 debug_assert!(self.lookup(bs).is_none());
             } else {
-                let _ =  self.0.insert(MarkedElt {
+                let _ = self.0.insert(MarkedElt {
                     prefix: prefix,
                     ptr: ptr,
                 });
@@ -249,8 +269,12 @@ mod dense_hash_set {
     }
     impl<T> ::std::fmt::Debug for MarkedElt<T> {
         fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
-            write!(f, "MarkedElt{{ {:?}, {:?} }}" ,
-                   self.prefix.digits().collect::<Vec<u8>>().as_slice(), self.ptr)
+            write!(
+                f,
+                "MarkedElt{{ {:?}, {:?} }}",
+                self.prefix.digits().collect::<Vec<u8>>().as_slice(),
+                self.ptr
+            )
         }
     }
 
@@ -292,7 +316,6 @@ mod dense_hash_set {
     where
         T::Key: Eq + Hash,
     {
-
         fn next_probe(hash: usize, i: usize) -> usize {
             hash + i
             // hash + (i + i * i)/2
@@ -306,12 +329,47 @@ mod dense_hash_set {
             }
         }
 
+        fn seek(
+            &self,
+            k: &T::Key,
+        ) -> (
+            Option<*mut T>, /* first tombstone */
+            Option<*mut T>, /* matching or null */
+        ) {
+            let mut tombstone = None;
+            let l = self.buckets.len();
+            debug_assert!(l.is_power_of_two());
+            let hash = {
+                let mut hasher = FnvHasher::default();
+                k.hash(&mut hasher);
+                hasher.finish() as usize
+            };
+            let mut ix = hash;
+            let mut times = 0;
+            while times < l {
+                ix &= l - 1;
+                debug_assert!(ix < self.buckets.len());
+                times += 1;
+                let bucket = unsafe { self.buckets.get_unchecked(ix) };
+                let bucket_raw = bucket as *const T as *mut T;
+                if tombstone.is_none() && bucket.is_tombstone() {
+                    tombstone = Some(bucket_raw);
+                } else if bucket.is_null() || bucket.key() == k {
+                    return (tombstone, Some(bucket_raw));
+                }
+                ix = Self::next_probe(hash, times);
+            }
+            (tombstone, None)
+        }
+
         fn grow(&mut self) {
             debug_assert!(self.set >= self.len);
             let old_len = if self.buckets.len() == 0 {
                 self.buckets.push(T::null());
                 return;
-            } else if self.buckets.len() < 32 || (self.set as i64) - (self.len as i64) < (self.buckets.len() as i64 / 4) {
+            } else if self.buckets.len() < 32
+                || (self.set as i64) - (self.len as i64) < (self.buckets.len() as i64 / 4)
+            {
                 // actually grow. If this condition is not met, then we just re-hash
                 let l = self.buckets.len();
                 self.buckets.extend((0..l).map(|_| T::null()));
@@ -346,110 +404,64 @@ mod dense_hash_set {
             if self.buckets.len() == 0 {
                 return None;
             }
-            let hash = {
-                let mut hasher = FnvHasher::default();
-                k.hash(&mut hasher);
-                (hasher.finish() & (self.buckets.len() as u64 - 1)) as usize
-            };
-            let mut ix = hash;
-            let mut times = 0;
-            while times < self.buckets.len() {
-                debug_assert!(ix < self.buckets.len());
-                times += 1;
-                let bucket = unsafe { self.buckets.get_unchecked(ix) };
-                if bucket.is_null() {
-                    return None;
+            let (_, b_opt) = self.seek(k);
+            b_opt.and_then(|b| {
+                unsafe {
+                    if (*b).is_null() {
+                        None
+                    } else {
+                        Some(&*b)
+                    }
                 }
-                if bucket.is_tombstone() || bucket.key() != k {
-                    ix = Self::next_probe(hash, times);
-                    ix &= self.buckets.len() - 1;
-                    continue;
-                }
-                return Some(bucket);
-            }
-            return None;
+            })
         }
 
         fn delete(&mut self, k: &T::Key) -> Option<T> {
-            let hash = {
-                let mut hasher = FnvHasher::default();
-                k.hash(&mut hasher);
-                (hasher.finish() & (self.buckets.len() as u64 - 1)) as usize
-            };
-            let mut ix = hash;
-            let mut times = 0;
-            let l = self.buckets.len();
-            while times < l {
-                debug_assert!(ix < self.buckets.len());
-                times += 1;
-                let bucket = unsafe { self.buckets.get_unchecked_mut(ix) };
-                if bucket.is_null() {
-                    return None;
-                }
-                if bucket.is_tombstone() || bucket.key() != k {
-                    ix = Self::next_probe(hash, times);
-                    ix &= l - 1;
-                    continue;
-                }
-                let mut deleted = T::tombstone();
-                mem::swap(bucket, &mut deleted);
-                self.len -= 1;
-                return Some(deleted);
+            if self.buckets.len() == 0 {
+                return None;
             }
-            return None;
+            let (_, b_opt) = self.seek(k);
+            b_opt.and_then(|b| {
+            unsafe  {
+                if (*b).is_null() {
+                    None
+                } else {
+                    let mut tomb = T::tombstone();
+                    mem::swap(&mut*b, &mut tomb);
+                    self.len -= 1;
+                    Some(tomb)
+                }
+            }})
         }
 
         fn insert(&mut self, mut t: T) -> Result<(), T> {
-            if self.set >= self.buckets.len()/2 {
+            if self.set >= self.buckets.len() / 2 {
                 self.grow();
             }
-            let l = self.buckets.len();
-            debug_assert!(l.is_power_of_two());
             debug_assert!(!t.is_null());
             debug_assert!(!t.is_tombstone());
-            let hash = {
-                let mut hasher = FnvHasher::default();
-                t.key().hash(&mut hasher);
-                hasher.finish() as usize
-            };
-            let mut ix = hash;
-            let mut times = 0;
-            while times < l {
-                ix &= l - 1;
-                debug_assert_eq!(l, self.buckets.len());
-                debug_assert!(ix < self.buckets.len());
-                times += 1;
-                let bucket = unsafe { self.buckets.get_unchecked_mut(ix) };
-                if bucket.is_null() || bucket.is_tombstone() {
-                    if bucket.is_null() {
+            let (tmb, b_opt) = self.seek(t.key());
+            unsafe {
+                let bucket = b_opt.unwrap();
+                if (*bucket).is_null() {
+                    // t is not already in the table. We insert it somewhere
+                    if let Some(tombstone_bucket) = tmb {
+                        // there was a tombstone earlier in the probe chain. We overwrite its
+                        // value.
+                        *tombstone_bucket = t;
+                    } else {
+                        // we insert it into the new slot
+                        *bucket = t;
                         self.set += 1;
                     }
-                    mem::swap(bucket, &mut t);
                     self.len += 1;
-                    return Ok(());
-                }
-                if bucket.key() == t.key() {
-                    mem::swap(bucket, &mut t);
-                    return Err(t);
-                }
-
-                ix = Self::next_probe(hash, times);
-            }
-            #[cfg(debug_assertions)]
-            {
-                for i in 0..l {
-                    let b = &self.buckets[i];
-                    eprintln!("[{}] {}", i, if b.is_null() { "null" } else if b.is_tombstone() { "tombstone" } else { "Node" } );
+                    Ok(())
+                } else {
+                    // t is already in the table, we simply swap in the new value
+                    mem::swap(&mut*bucket, &mut t);
+                    Err(t)
                 }
             }
-            panic!(
-                "table too small! blen={}, set={}, len={}, l={} hash={}",
-                self.buckets.len(),
-                self.set,
-                self.len,
-                l,
-                hash
-            )
         }
     }
 
