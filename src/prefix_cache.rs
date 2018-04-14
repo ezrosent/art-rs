@@ -25,6 +25,8 @@ pub trait PrefixCache<T> {
     fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
         let _ = self.replace(bs, ptr);
     }
+    #[inline(always)]
+    fn debug_assert_unreachable(&self, _ptr: MarkedPtr<T>) {}
 }
 pub struct NullBuckets<T>(PhantomData<T>);
 
@@ -162,6 +164,8 @@ mod dense_hash_set {
     use super::*;
     use super::fnv::FnvHasher;
 
+    #[cfg(debug_assertions)]
+    use super::super::Digital;
     use std::hash::{Hash, Hasher};
     use std::mem;
 
@@ -172,6 +176,22 @@ mod dense_hash_set {
         fn new(_buckets: usize) -> Self {
             HashSetPrefixCache(DenseHashTable::new())
         }
+
+        #[cfg(debug_assertions)]
+        fn debug_assert_unreachable(&self, ptr: MarkedPtr<T>) {
+            for elt in self.0.buckets.iter() {
+                if elt.ptr == ptr {
+                    assert!(self.0.lookup(&elt.prefix).is_some(), "attempted to look up {:?}:{:?} but failed",
+                            elt.prefix, elt.ptr);
+                    let l = self.0.lookup(&elt.prefix).unwrap();
+                    assert!(l.ptr == elt.ptr, "got {:?} != elt {:?}", l, elt);
+                    assert!(elt.ptr != ptr,
+                            "Found ptr {:?} in elt with prefix {:?} [{:?}]",
+                            ptr, elt.prefix, elt.prefix.digits().collect::<Vec<u8>>().as_slice())
+                }
+            }
+        }
+
         fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>> {
             let prefix = HashBuckets::<T>::read_u64(bs);
             let res = self.0.lookup(&prefix).map(|elt| elt.ptr.clone());
@@ -188,6 +208,7 @@ mod dense_hash_set {
             let prefix = HashBuckets::<T>::read_u64(bs);
             if ptr.is_null() {
                 self.0.delete(&prefix);
+                debug_assert!(self.lookup(bs).is_none());
             } else {
                 let _ =  self.0.insert(MarkedElt {
                     prefix: prefix,
@@ -225,6 +246,12 @@ mod dense_hash_set {
     struct MarkedElt<T> {
         prefix: u64,
         ptr: MarkedPtr<T>,
+    }
+    impl<T> ::std::fmt::Debug for MarkedElt<T> {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
+            write!(f, "MarkedElt{{ {:?}, {:?} }}" ,
+                   self.prefix.digits().collect::<Vec<u8>>().as_slice(), self.ptr)
+        }
     }
 
     impl<T> DHTE for MarkedElt<T> {
@@ -267,7 +294,8 @@ mod dense_hash_set {
     {
 
         fn next_probe(hash: usize, i: usize) -> usize {
-            hash + (i + i * i)/2
+            hash + i
+            // hash + (i + i * i)/2
         }
 
         fn new() -> Self {
@@ -294,8 +322,7 @@ mod dense_hash_set {
             debug_assert!(self.buckets.len().is_power_of_two());
             debug_assert!(old_len.is_power_of_two());
             let mut v = Vec::with_capacity(self.len);
-            for ix in 0..old_len {
-                let i = unsafe { self.buckets.get_unchecked_mut(ix) };
+            for i in &mut self.buckets[0..old_len] {
                 if i.is_null() {
                     continue;
                 }
@@ -376,17 +403,19 @@ mod dense_hash_set {
             if self.set >= self.buckets.len()/2 {
                 self.grow();
             }
+            let l = self.buckets.len();
+            debug_assert!(l.is_power_of_two());
             debug_assert!(!t.is_null());
             debug_assert!(!t.is_tombstone());
-            let l = self.buckets.len();
             let hash = {
                 let mut hasher = FnvHasher::default();
                 t.key().hash(&mut hasher);
-                (hasher.finish() & (l as u64 - 1)) as usize
+                hasher.finish() as usize
             };
             let mut ix = hash;
             let mut times = 0;
             while times < l {
+                ix &= l - 1;
                 debug_assert_eq!(l, self.buckets.len());
                 debug_assert!(ix < self.buckets.len());
                 times += 1;
@@ -405,7 +434,6 @@ mod dense_hash_set {
                 }
 
                 ix = Self::next_probe(hash, times);
-                ix &= l - 1;
             }
             #[cfg(debug_assertions)]
             {

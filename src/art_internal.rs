@@ -19,6 +19,13 @@ pub struct MarkedPtr<T>(usize, PhantomData<T>);
 pub use self::node_variants::{NODE_16, NODE_256, NODE_4, NODE_48, Node16, Node256, Node48,
                               NodeType};
 
+
+impl<T> PartialEq for MarkedPtr<T> {
+    fn eq(&self, other: &MarkedPtr<T>) -> bool { self.0 == other.0 }
+}
+
+impl<T> Eq for MarkedPtr<T> { }
+
 pub trait Element {
     type Key: for<'a> Digital<'a> + PartialOrd;
     fn key(&self) -> &Self::Key;
@@ -63,7 +70,13 @@ impl<T> Drop for ChildPtr<T> {
 
 impl<T> ::std::fmt::Debug for MarkedPtr<T> {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
-        write!(f, "MarkedPtr({:?})", self.0)
+        unsafe {
+            write!(f, "MarkedPtr({})", match self.get_raw() {
+                None => String::from("null"),
+                Some(Ok(leaf_ptr)) => format!("leaf:{:?}", leaf_ptr),
+                Some(Err(inner)) => format!("inner:{:?}", *inner),
+            })
+        }
     }
 }
 
@@ -593,8 +606,10 @@ mod node_variants {
                 }
                 if self.node.keys[i] == d {
                     unsafe {
-                        debug_assert!(!self.node.ptrs[i].is_null(), "keys={:?} ptrs={:?}",
-                            &self.node.keys[..], &self.node.ptrs[..]);
+                        debug_assert!(
+                            !self.node.ptrs[i].is_null(),
+                            "Returning something null (i={}, d={}) (already-deleted node?)! keys={:?} ptrs={:?}",
+                            i, d, &self.node.keys[..], &self.node.ptrs[..]);
                         return Some((i, self.node.ptrs.get_unchecked(i) as *const _ as *mut _));
                     };
                 }

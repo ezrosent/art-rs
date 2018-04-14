@@ -280,6 +280,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     if leaf_node.matches(k) {
                         // we have a match! delete the leaf
                         if let Some((d, parent_ref)) = parent {
+                            let marked_p = parent_ref.to_marked();
                             let (res, asgn) = with_node_mut!(
                                 parent_ref.get_mut().unwrap().err().unwrap(),
                                 node,
@@ -301,7 +302,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                                 buckets
                                                     .insert(&digits[0..target], MarkedPtr::null());
                                             } else if C::ENABLED && digits.len() >= target {
-                                                debug_assert!(buckets.lookup(&digits[0..target]).is_none());
+                                                debug_assert!(buckets.lookup(&digits[0..target]).is_none(),
+                                                    "{:?} should be None (prefix={:?})",
+                                                    buckets.lookup(&digits[0..target]), &digits[0..target]);
                                             }
                                             (Success(move_val_out(deleted)), None)
                                         }
@@ -327,11 +330,13 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                                 if let Ok(_leaf) = last.get().unwrap() {
                                                     let mut leaf_digits = SmallVec::<[u8; 8]>::new();
                                                     let leaf: &T = _leaf;
-                                                    leaf_digits.extend(leaf.key().digits());
-                                                    if leaf_digits.len() >= target && consumed <= target + 1 {
-                                                        buckets.insert(&leaf_digits[..target], last.to_marked());
-                                                    } else if leaf_digits.len() >= target {
-                                                        debug_assert!(buckets.lookup(&leaf_digits[0..target]).is_none());
+                                                    leaf_digits.extend(leaf.key().digits().take(8));
+                                                    if leaf_digits.len() >= target && consumed <= target {
+                                                        buckets.insert(&leaf_digits[0..target], last.to_marked());
+                                                        debug_assert_eq!(buckets.lookup(&leaf_digits[0..target]), Some(last.to_marked()));
+                                                        eprintln!("Remapping digits {:?} while deleting {:?}",
+                                                                  &leaf_digits[..], &digits[..]);
+                                                        buckets.debug_assert_unreachable(marked_p);
                                                     }
                                                 }
                                             }
@@ -350,6 +355,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 let mut replace = false;
                                 let mut ds = SmallVec::<[u8; 8]>::new();
                                 {
+                                    let _p_marked = parent_ref.to_marked();
                                     let pp = parent_ref.get_mut().unwrap().err().unwrap();
                                     if C::ENABLED && pp.consumed as usize <= target
                                         && target <= pp.consumed as usize + pp.count as usize
@@ -364,10 +370,12 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         // case it replaces 'pp'.
                                         replace = true;
                                         if digits.len() < target {
-                                            for dd in &digits[..pp.consumed as usize] {
+                                            for dd in &digits[0..pp.consumed as usize] {
                                                 ds.push(*dd)
                                             }
                                         }
+                                    } else if C::ENABLED {
+                                        debug_assert!(buckets.lookup(&digits[0..target]) != Some(_p_marked));
                                     }
                                     if let Err(inner) = c_ptr.get_mut().unwrap() {
                                         // The "last" node that we are promoting is an interior
@@ -377,7 +385,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         let mut prefix_digits =
                                             SmallVec::<[u8; PREFIX_LEN + 1]>::new();
                                         for dd in &pp.prefix
-                                            [..cmp::min(parent_count as usize, PREFIX_LEN)]
+                                            [0..cmp::min(parent_count as usize, PREFIX_LEN)]
                                         {
                                             prefix_digits.push(*dd);
                                         }
@@ -394,12 +402,12 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             switch = true;
                                             if digits.len() < target {
                                                 if !replace {
-                                                    for dd in &digits[..pp.consumed as usize] {
+                                                    for dd in &digits[0..pp.consumed as usize] {
                                                         ds.push(*dd);
                                                     }
                                                 }
                                                 for dd in &inner.prefix
-                                                    [..cmp::min(inner.count as usize, PREFIX_LEN)]
+                                                    [0..cmp::min(inner.count as usize, PREFIX_LEN)]
                                                 {
                                                     ds.push(*dd);
                                                 }
@@ -408,7 +416,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                     }
                                     if C::ENABLED && replace && !switch && digits.len() < target {
                                         for dd in
-                                            &pp.prefix[..cmp::min(pp.count as usize, PREFIX_LEN)]
+                                            &pp.prefix[0..cmp::min(pp.count as usize, PREFIX_LEN)]
                                         {
                                             ds.push(*dd);
                                         }
@@ -726,7 +734,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                                 if ds.len() < target {
                                                     return;
                                                 }
-                                                buckets.insert(&ds[..target], marked_p.clone());
+                                                buckets.insert(&ds[0..target], marked_p.clone());
                                             }
                                         });
                                     }, T);
