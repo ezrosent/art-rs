@@ -243,7 +243,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             k: &T::Key,
             mut curr: MarkedPtr<T>,
             curr_ptr: Option<&mut ChildPtr<T>>,
-            parent: Option<(u8, &mut ChildPtr<T>)>,
+            parent: Option<(u8, Result<MarkedPtr<T>, &mut ChildPtr<T>>)>,
             digits: &[u8],
             mut consumed: usize,
             target: usize,
@@ -270,12 +270,21 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
 
             let rest_opts = match curr.get_mut().unwrap() {
                 Ok(leaf_node) => {
-                    /* digits.len() == 0 || */
                     if leaf_node.matches(k) {
                         // we have a match! delete the leaf
-                        if let Some((d, parent_ref)) = parent {
+                        if let Some((d, mut parent_ref)) = parent {
                             let (res, asgn) = with_node_mut!(
-                                parent_ref.get_mut().unwrap().err().unwrap(),
+                                match parent_ref {
+                                    Ok(ref mut marked_parent) => {
+                                        let p_ref = marked_parent.get_mut().unwrap().err().unwrap();
+                                        if p_ref.children == 2 {
+                                            return Partial;
+                                        }
+                                        p_ref
+                                    },
+                                    Err(ref mut parent_ptr) =>
+                                        parent_ptr.get_mut().unwrap().err().unwrap()
+                                },
                                 node,
                                 {
                                     match node.delete(d) {
@@ -363,8 +372,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 let mut replace = false;
                                 let mut ds = SmallVec::<[u8; 8]>::new();
                                 {
-                                    let _p_marked = parent_ref.to_marked();
-                                    let pp = parent_ref.get_mut().unwrap().err().unwrap();
+                                    let _p_marked = match parent_ref { Ok(ref m) => m.clone(), Err(ref ptr) => ptr.to_marked() };
+                                    let pp = match parent_ref { Ok (ref m) => m.get().unwrap().err().unwrap(), Err(ref ptr) => ptr.get().unwrap().err().unwrap()};
                                     if C::ENABLED && pp.consumed as usize <= target
                                         && target <= pp.consumed as usize + pp.count as usize
                                     {
@@ -432,7 +441,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         }
                                     }
                                 }
-                                mem::swap(parent_ref, &mut c_ptr);
+                                let c_marked = c_ptr.to_marked();
+                                mem::swap(parent_ref.err().unwrap(), &mut c_ptr);
                                 if C::ENABLED {
                                     let mut d_slice = &digits[..];
                                     if digits.len() < target && (switch || replace) {
@@ -441,8 +451,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         d_slice = ds.as_slice();
                                     }
                                     if switch || replace {
-                                        buckets
-                                            .insert(&d_slice[0..target], (*parent_ref).to_marked());
+                                        buckets.insert(&d_slice[0..target], c_marked);
                                     }
                                 }
                             }
@@ -482,7 +491,11 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             k,
                             marked,
                             Some(c_ptr),
-                            curr_ptr.map(|x| (next_digit, x)),
+                            // curr_ptr.map(|x| (next_digit, x)),
+                            Some((next_digit, match curr_ptr {
+                                Some(x) => Err(x),
+                                None => Ok(curr),
+                            })),
                             digits,
                             consumed,
                             target,
