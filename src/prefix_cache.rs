@@ -6,7 +6,6 @@ use std::marker::PhantomData;
 use std::ptr;
 
 use super::art_internal::MarkedPtr;
-use super::byteorder::{BigEndian, ByteOrder};
 
 pub use self::dense_hash_set::HashSetPrefixCache;
 
@@ -16,7 +15,7 @@ pub trait PrefixCache<T> {
     const ENABLED: bool;
     /// If true, lookup returning None indicates that no nodes with prefix `bs` are in the set.
     const COMPLETE: bool;
-    fn new(buckets: usize) -> Self;
+    fn new() -> Self;
     fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>>;
     fn replace(&mut self, bs: &[u8], ptr: MarkedPtr<T>) -> Option<MarkedPtr<T>> {
         self.insert(bs, ptr);
@@ -33,7 +32,7 @@ pub struct NullBuckets<T>(PhantomData<T>);
 impl<T> PrefixCache<T> for NullBuckets<T> {
     const ENABLED: bool = false;
     const COMPLETE: bool = false;
-    fn new(_: usize) -> Self {
+    fn new() -> Self {
         NullBuckets(PhantomData)
     }
     fn lookup(&self, _: &[u8]) -> Option<MarkedPtr<T>> {
@@ -42,112 +41,15 @@ impl<T> PrefixCache<T> for NullBuckets<T> {
     fn insert(&mut self, _: &[u8], _ptr: MarkedPtr<T>) {}
 }
 
-pub struct HashBuckets<T> {
-    data: Vec<(u64, MarkedPtr<T>)>,
-    len: usize,
-    #[cfg(feature = "print_cache_stats")]
-    misses: UnsafeCell<usize>,
-    #[cfg(feature = "print_cache_stats")]
-    hits: UnsafeCell<usize>,
-    #[cfg(feature = "print_cache_stats")]
-    collisions: UnsafeCell<usize>,
-    #[cfg(feature = "print_cache_stats")]
-    overwrites: usize,
-}
+mod dense_hash_set {
+    use super::*;
+    use super::fnv::FnvHasher;
+    use super::super::Digital;
+    use super::super::byteorder::{BigEndian, ByteOrder};
 
-impl<T> Drop for HashBuckets<T> {
-    fn drop(&mut self) {
-        #[cfg(feature = "print_cache_stats")]
-        unsafe {
-            let h = *self.hits.get();
-            let m = *self.misses.get();
-            let c = *self.collisions.get();
-            eprintln!(
-                "hits={:?} miss={:?} collisions={:?} hit rate={:?} len={:?} overwrites={:?}",
-                h,
-                m,
-                c,
-                h as f64 / (h + m + c) as f64,
-                self.len,
-                self.overwrites
-            );
-        }
-    }
-}
+    use std::hash::{Hash, Hasher};
+    use std::mem;
 
-impl<T> PrefixCache<T> for HashBuckets<T> {
-    const ENABLED: bool = true;
-    const COMPLETE: bool = false;
-
-    fn new(size: usize) -> Self {
-        #[cfg(feature = "print_cache_stats")]
-        {
-            HashBuckets {
-                data: (0..size.next_power_of_two())
-                    .map(|_| (0, MarkedPtr::null()))
-                    .collect::<Vec<_>>(),
-                misses: UnsafeCell::new(0),
-                hits: UnsafeCell::new(0),
-                collisions: UnsafeCell::new(0),
-                overwrites: 0,
-                len: 0,
-            }
-        }
-        #[cfg(not(feature = "print_cache_stats"))]
-        {
-            HashBuckets {
-                data: (0..size.next_power_of_two())
-                    .map(|_| (0, MarkedPtr::null()))
-                    .collect::<Vec<_>>(),
-                len: 0,
-            }
-        }
-    }
-
-    fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>> {
-        let key = self.get_index(bs);
-        let (i, ptr) = unsafe { self.data.get_unchecked(key) }.clone();
-        if ptr.is_null() {
-            #[cfg(feature = "print_cache_stats")]
-            unsafe {
-                *self.misses.get() += 1
-            };
-            None
-        } else {
-            let key = Self::read_u64(bs);
-            if key == i {
-                #[cfg(feature = "print_cache_stats")]
-                unsafe {
-                    *self.hits.get() += 1
-                };
-                Some(ptr)
-            } else {
-                #[cfg(feature = "print_cache_stats")]
-                unsafe {
-                    *self.collisions.get() += 1
-                };
-                None
-            }
-        }
-    }
-
-    fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
-        let h = self.get_index(bs);
-        let key = Self::read_u64(bs);
-        if unsafe { self.data.get_unchecked(h).1.is_null() } {
-            self.len += 1;
-        }
-        #[cfg(feature = "print_cache_stats")]
-        {
-            let (k, _ptr) = unsafe { self.data.get_unchecked(h) }.clone();
-            if !_ptr.is_null() && k == key {
-                self.overwrites += 1;
-            }
-        }
-        unsafe { *self.data.get_unchecked_mut(h) = (key, ptr) };
-    }
-}
-impl<T> HashBuckets<T> {
     fn read_u64(bs: &[u8]) -> u64 {
         debug_assert!(bs.len() <= 8);
         let mut arr = [0 as u8; 8];
@@ -155,30 +57,11 @@ impl<T> HashBuckets<T> {
         BigEndian::read_u64(&arr[..])
     }
 
-    fn get_index(&self, bs: &[u8]) -> usize {
-        debug_assert!(self.data.len().is_power_of_two());
-        use self::fnv::FnvHasher;
-        use std::hash::Hasher;
-        let mut hasher = FnvHasher::default();
-        let u = Self::read_u64(bs);
-        hasher.write_u64(u);
-        hasher.finish() as usize & (self.data.len() - 1)
-    }
-}
-
-mod dense_hash_set {
-    use super::*;
-    use super::fnv::FnvHasher;
-
-    use super::super::Digital;
-    use std::hash::{Hash, Hasher};
-    use std::mem;
-
     pub struct HashSetPrefixCache<T>(DenseHashTable<MarkedElt<T>>);
     impl<T> PrefixCache<T> for HashSetPrefixCache<T> {
         const ENABLED: bool = true;
         const COMPLETE: bool = true;
-        fn new(_buckets: usize) -> Self {
+        fn new() -> Self {
             HashSetPrefixCache(DenseHashTable::new())
         }
 
@@ -206,7 +89,7 @@ mod dense_hash_set {
         }
 
         fn lookup(&self, bs: &[u8]) -> Option<MarkedPtr<T>> {
-            let prefix = HashBuckets::<T>::read_u64(bs);
+            let prefix = read_u64(bs);
             let res = self.0.lookup(&prefix).map(|elt| elt.ptr.clone());
             #[cfg(debug_assertions)]
             unsafe {
@@ -225,7 +108,7 @@ mod dense_hash_set {
         }
 
         fn insert(&mut self, bs: &[u8], ptr: MarkedPtr<T>) {
-            let prefix = HashBuckets::<T>::read_u64(bs);
+            let prefix = read_u64(bs);
             if ptr.is_null() {
                 self.0.delete(&prefix);
                 debug_assert!(self.lookup(bs).is_none());
@@ -238,7 +121,7 @@ mod dense_hash_set {
         }
 
         fn replace(&mut self, bs: &[u8], ptr: MarkedPtr<T>) -> Option<MarkedPtr<T>> {
-            let prefix = HashBuckets::<T>::read_u64(bs);
+            let prefix = read_u64(bs);
             if ptr.is_null() {
                 self.0.delete(&prefix)
             } else {
@@ -317,8 +200,8 @@ mod dense_hash_set {
         T::Key: Eq + Hash,
     {
         fn next_probe(hash: usize, i: usize) -> usize {
-            hash + i
-            // hash + (i + i * i)/2
+            // hash + i
+            hash + (i + i * i)/2
         }
 
         fn new() -> Self {

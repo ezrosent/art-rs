@@ -7,12 +7,93 @@ use super::byteorder::{BigEndian, ByteOrder};
 /// The type's `digits` should respect equality and ordering on the type.
 /// Furthermore, if the `digits` of one value are a prefix of the `digits`
 /// of another value of the same type, the two values must be equal.
+///
+/// TODO implement floating point support. This is described in the ART paper but a couple details
+/// are left out.
+///
+/// TODO implement macro/derive that will create a "digits" representation for any ordered type.
 pub trait Digital<'a> {
+    // TODO: consider providing a more efficient interface here (e.g. passing a slice directly)
     type I: Iterator<Item = u8> + 'a;
     fn digits(&'a self) -> Self::I;
 }
 
-// TODO: Add implementation for the rest of the numeric, string types
+pub struct U32BytesIterator {
+    cursor: usize,
+    bytes: [u8; 4],
+}
+
+impl Iterator for U32BytesIterator {
+    type Item = u8;
+    fn next(&mut self) -> Option<u8> {
+        if self.cursor < 4 {
+            self.cursor += 1;
+            Some(self.bytes[self.cursor - 1])
+        } else {
+            None
+        }
+    }
+
+    fn nth(&mut self, n: usize) -> Option<u8> {
+        self.cursor += n;
+        self.next()
+    }
+}
+
+impl<'a> Digital<'a> for u32 {
+    type I = U32BytesIterator;
+    fn digits(&self) -> U32BytesIterator {
+        let mut res = U32BytesIterator {
+            cursor: 0,
+            bytes: [0; 4],
+        };
+        BigEndian::write_u32(&mut res.bytes, *self);
+        res
+    }
+}
+
+impl<'a> Digital<'a> for i32 {
+    type I = U32BytesIterator;
+    fn digits(&self) -> U32BytesIterator {
+        let mut res = U32BytesIterator {
+            cursor: 0,
+            bytes: [0; 4],
+        };
+        BigEndian::write_i32(&mut res.bytes, *self ^ (1 << 31));
+        res
+    }
+}
+
+impl<'a> Digital<'a> for i64 {
+    type I = U64BytesIterator;
+    fn digits(&self) -> U64BytesIterator {
+        let mut res = U64BytesIterator {
+            cursor: 0,
+            bytes: [0; 8],
+        };
+        BigEndian::write_i64(&mut res.bytes, *self ^ (1 << 63));
+        res
+    }
+}
+
+impl<'a> Digital<'a> for usize {
+    // Just treat usize as u64. This should (inefficiently) support platforms with a smaller type,
+    // and we debug-assert that usize <= u64 in size.
+    type I = U64BytesIterator;
+    fn digits(&self) -> Self::I {
+        debug_assert!(::std::mem::size_of::<usize>() <= ::std::mem::size_of::<u64>());
+        (*self as u64).digits()
+    }
+}
+
+impl<'a> Digital<'a> for isize {
+    type I = U64BytesIterator;
+    fn digits(&self) -> Self::I {
+        debug_assert!(::std::mem::size_of::<isize>() <= ::std::mem::size_of::<i64>());
+        (*self as i64).digits()
+    }
+}
+
 pub struct U64BytesIterator {
     cursor: usize,
     bytes: [u8; 8],
@@ -125,7 +206,7 @@ impl<'a> Digital<'a> for String {
 mod tests {
     use super::*;
 
-    fn test_digits_obey_order<D: for<'a> Digital<'a> + Ord>(x: D, y: D) -> bool {
+    fn test_digits_obey_order<D: for<'a> Digital<'a> + PartialOrd>(x: D, y: D) -> bool {
         let vx: Vec<_> = x.digits().collect();
         let vy: Vec<_> = y.digits().collect();
         if x < y {
@@ -140,9 +221,29 @@ mod tests {
             test_digits_obey_order(x, y)
         }
 
-        fn digits_unsigned_ints(x: u64, y: u64) -> bool {
+        fn digits_u64(x: u64, y: u64) -> bool {
             // why shift left? the RNG seems to generate numbers <256, so endianness bugs do not
             // get caught!
+            test_digits_obey_order(x.wrapping_shl(20), y.wrapping_shl(20))
+        }
+
+        fn digits_u32(x: u32, y: u32) -> bool {
+            test_digits_obey_order(x.wrapping_shl(20), y.wrapping_shl(20))
+        }
+
+        fn digits_i32(x: i32, y: i32) -> bool {
+            test_digits_obey_order(x.wrapping_mul(1 << 10), y.wrapping_mul(1 << 10))
+        }
+
+        fn digits_i64(x: i64, y: i64) -> bool {
+            test_digits_obey_order(x.wrapping_mul(1 << 20), y.wrapping_mul(1 << 20))
+        }
+
+        fn digits_isize(x: isize, y: isize) -> bool {
+            test_digits_obey_order(x.wrapping_mul(1 << 20), y.wrapping_mul(1 << 20))
+        }
+
+        fn digits_usize(x: usize, y: usize) -> bool {
             test_digits_obey_order(x.wrapping_shl(20), y.wrapping_shl(20))
         }
     }

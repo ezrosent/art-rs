@@ -7,7 +7,7 @@ use std::ptr;
 
 use super::Digital;
 use super::art_internal::*;
-use super::prefix_cache::{HashBuckets, HashSetPrefixCache, NullBuckets};
+use super::prefix_cache::{HashSetPrefixCache, NullBuckets};
 use super::smallvec::SmallVec;
 pub use super::prefix_cache::PrefixCache;
 
@@ -36,8 +36,7 @@ impl<T: for<'a> Digital<'a> + PartialOrd> Element for ArtElement<T> {
 }
 
 pub type ARTSet<T> = RawART<ArtElement<T>, NullBuckets<ArtElement<T>>>;
-pub type MidARTSet<T> = RawART<ArtElement<T>, HashSetPrefixCache<ArtElement<T>>>;
-pub type LargeARTSet<T> = RawART<ArtElement<T>, HashBuckets<ArtElement<T>>>;
+pub type CachingARTSet<T> = RawART<ArtElement<T>, HashSetPrefixCache<ArtElement<T>>>;
 
 impl<T: for<'a> Digital<'a> + PartialOrd, C: PrefixCache<ArtElement<T>>> RawART<ArtElement<T>, C> {
     pub fn contains<Q>(&self, key: &Q) -> bool
@@ -127,15 +126,15 @@ pub struct RawART<T: Element, C: PrefixCache<T>> {
 
 impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub fn new() -> Self {
-        RawART::with_prefix_buckets(3, 256 * 256 * 256 * 2)
+        RawART::with_prefix_buckets(4)
     }
 
-    pub fn with_prefix_buckets(prefix_len: usize, buckets: usize) -> Self {
+    pub fn with_prefix_buckets(prefix_len: usize) -> Self {
         assert!(prefix_len <= 8);
         RawART {
             len: 0,
             root: ChildPtr::null(),
-            buckets: C::new(buckets),
+            buckets: C::new(),
             prefix_target: prefix_len,
         }
     }
@@ -1051,9 +1050,8 @@ mod tests {
                     );
                 }
             },
-            MidARTSet - u64,
-            ARTSet - u64,
-            LargeARTSet - u64
+            CachingARTSet - u64,
+            ARTSet - u64
         );
     }
 
@@ -1116,8 +1114,7 @@ mod tests {
                 }
             },
             ARTSet - String,
-            MidARTSet - String,
-            LargeARTSet - String
+            CachingARTSet - String
         );
     }
 

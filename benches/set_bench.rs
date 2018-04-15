@@ -3,15 +3,15 @@ extern crate criterion;
 extern crate radix_tree;
 extern crate rand;
 
-use criterion::{Bencher, Criterion, Fun};
+use criterion::{Bencher, Criterion};
 use rand::{Rng, SeedableRng, StdRng};
 use std::collections::btree_set::BTreeSet;
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use radix_tree::{ARTSet, ArtElement, Digital, LargeARTSet, MidARTSet, PrefixCache, RawART};
+use radix_tree::{ARTSet, ArtElement, Digital, CachingARTSet, PrefixCache, RawART};
 
-const RAND_SEED: [usize; 32] = [0; 32];
+const RAND_SEED: [usize; 32] = [1; 32];
 
 /// Barebones set trait to abstract over various collections.
 trait Set<T> {
@@ -85,7 +85,7 @@ fn random_string_vec(max_len: usize, len: usize) -> Vec<String> {
         .collect()
 }
 
-fn bench_set_rand_int_lookup<S: Set<u64>>(b: &mut Bencher, contents: &S, lookups: &Vec<u64>) {
+fn bench_set_rand_int_lookup<T: for <'a> Digital<'a>, S: Set<T>>(b: &mut Bencher, contents: &S, lookups: &Vec<T>) {
     assert!(lookups.len().is_power_of_two());
     let mut ix = 0;
     b.iter(|| {
@@ -95,11 +95,11 @@ fn bench_set_rand_int_lookup<S: Set<u64>>(b: &mut Bencher, contents: &S, lookups
     })
 }
 
-fn bench_set_insert_remove<S: Set<u64>>(b: &mut Bencher, contents: &mut S, lookups: &Vec<u64>) {
+fn bench_set_insert_remove<T: Clone + for<'a> Digital<'a>, S: Set<T>>(b: &mut Bencher, contents: &mut S, lookups: &Vec<T>) {
     assert!(lookups.len().is_power_of_two());
     let mut ix = 0;
     b.iter(|| {
-        contents.insert(lookups[ix]);
+        contents.insert(lookups[ix].clone());
         ix += 1;
         ix = ix & (lookups.len() - 1);
         contents.delete(&lookups[ix]);
@@ -108,123 +108,31 @@ fn bench_set_insert_remove<S: Set<u64>>(b: &mut Bencher, contents: &mut S, looku
     })
 }
 
-fn bench_set_rand_int_lookup_in_set<S: Set<u64>>(
-    b: &mut Bencher,
-    mut set_size: usize,
-    max_elt: u64,
-) {
-    set_size = set_size.next_power_of_two();
-    let mut s = S::new();
-    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
-    let elts: Vec<u64> = (0..set_size)
-        .map(|_| rng.gen_range::<u64>(0, max_elt))
-        .collect();
-    for i in elts.iter() {
-        s.insert(*i);
-    }
-    let mut ix = 0;
-    b.iter(|| {
-        s.contains(&elts[ix]);
-        ix += 1;
-        ix = ix & (set_size - 1);
-    })
-}
-
-fn bench_set_rand_string<S: Set<String>>(b: &mut Bencher, mut set_size: usize, max_len: usize) {
-    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
-    set_size = set_size.next_power_of_two();
-    let elts: Vec<String> = (0..set_size)
-        .map(|_| {
-            let s_len = rng.gen_range::<usize>(0, max_len);
-            String::from_utf8((0..s_len).map(|_| rng.gen_range::<u8>(0, 128)).collect()).unwrap()
-        })
-        .collect();
-    let mut s = S::new();
-    for i in elts.iter() {
-        s.insert(i.clone());
-    }
-    let mut ix = 0;
-    b.iter(|| {
-        s.contains(&elts[ix]);
-        ix += 1;
-        ix = ix & (set_size - 1);
-    })
-}
-
-fn bench_set_rand_int_lookup_not_in_set<S: Set<u64>>(
-    b: &mut Bencher,
-    mut set_size: usize,
-    max_elt: u64,
-) {
-    set_size = set_size.next_power_of_two();
-    let mut s = S::new();
-    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
-    let elts: Vec<u64> = (0..set_size)
-        .map(|_| rng.gen_range::<u64>(0, max_elt))
-        .collect();
-    let elts2: Vec<u64> = (0..set_size).map(|_| rng.gen_range::<u64>(0, !0)).collect();
-    for i in elts.iter() {
-        s.insert(*i);
-    }
-    let mut ix = 0;
-    b.iter(|| {
-        s.contains(&elts2[ix]);
-        ix += 1;
-        ix = ix & (set_size - 1);
-    })
-}
-
-fn bench_set_rand_int_insert_remove<S: Set<u64>>(
-    b: &mut Bencher,
-    mut set_size: usize,
-    max_elt: u64,
-) {
-    set_size = set_size.next_power_of_two();
-    let mut s = S::new();
-    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
-    let elts: Vec<u64> = (0..set_size)
-        .map(|_| rng.gen_range::<u64>(0, max_elt))
-        .collect();
-    for i in elts.iter() {
-        s.insert(*i);
-    }
-    let mut ix = 0;
-    b.iter(|| {
-        s.insert(elts[ix]);
-        s.delete(&elts[(ix + 2) & (set_size - 1)]);
-        ix += 1;
-        ix = ix & (set_size - 1);
-    })
-}
-
 fn criterion_benchmark(c: &mut Criterion) {
     use std::fmt::{Debug, Error, Formatter};
     #[derive(Clone)]
-    struct SizeVec(Vec<u64>, Vec<u64>);
-    impl Debug for SizeVec {
+    struct SizeVec<T>(Vec<T>, Vec<T>);
+    impl<T> Debug for SizeVec<T> {
         fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
             write!(f, "{:?}", self.0.len())
         }
     }
-    let v1s: Vec<SizeVec> = [16 << 10, 16 << 20, 64 << 20]
+    eprintln!("Generating Ints");
+    let v1s: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 128 << 20]
         .iter()
         .map(|size: &usize| SizeVec(random_vec(*size, !0), random_vec(*size, !0)))
         .collect();
 
-    fn make_fns<S: Set<u64>>() -> Vec<Fun<()>> {
-        vec![
-            Fun::new("16k_insert_remove", |b, _| {
-                bench_set_rand_int_insert_remove::<S>(b, 16 << 10, !0)
-            }),
-            Fun::new("1M_insert_remove", |b, _| {
-                bench_set_rand_int_insert_remove::<S>(b, 1 << 20, !0)
-            }),
-        ]
-    }
-    fn make_bench<S: Set<u64> + 'static>(c: &mut Criterion, desc: &str, inp: &Vec<SizeVec>) {
+    eprintln!("Generating Strings");
+    let v2s: Vec<SizeVec<String>> = [16 << 10, 64 << 20]
+        .iter()
+        .map(|size: &usize| SizeVec(random_string_vec(30, *size), random_string_vec(30, *size)))
+        .collect();
+
+    fn make_bench<T: 'static + Clone + for<'a> Digital<'a>, S: Set<T> + 'static>(c: &mut Criterion, desc: String, inp: &Vec<SizeVec<T>>) {
         eprintln!("Generating for {} (1/3)", desc);
-        struct Wrap<T>(SizeVec, Box<T>);
-        impl<T> Debug for Wrap<T> {
+        struct Wrap<S, T>(SizeVec<S>, Box<T>);
+        impl<S, T> Debug for Wrap<S, T> {
             fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
                 write!(f, "{:?}", self.0)
             }
@@ -233,14 +141,14 @@ fn criterion_benchmark(c: &mut Criterion) {
             .map(|sv| {
                 let mut s = S::new();
                 for i in sv.0.iter() {
-                    s.insert(*i);
+                    s.insert(i.clone());
                 }
                 Wrap(sv.clone(), Box::new(s))
             })
-            .collect::<Vec<Wrap<_>>>();
+            .collect::<Vec<Wrap<_,_>>>();
         c.bench_function_over_inputs(
             &format!("{}/lookup_hit", desc),
-            |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<S>(b, &*s, &sv.0),
+            |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<T, S>(b, &*s, &sv.0),
             sets1,
         );
         eprintln!("Generating for {} (2/3)", desc);
@@ -248,14 +156,14 @@ fn criterion_benchmark(c: &mut Criterion) {
             .map(|sv| {
                 let mut s = S::new();
                 for i in sv.0.iter() {
-                    s.insert(*i);
+                    s.insert(i.clone());
                 }
                 Wrap(sv.clone(), Box::new(s))
             })
-            .collect::<Vec<Wrap<_>>>();
+            .collect::<Vec<Wrap<_,_>>>();
         c.bench_function_over_inputs(
             &format!("{}/lookup_miss", desc),
-            |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<S>(b, &*s, &sv.1),
+            |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<T, S>(b, &*s, &sv.1),
             sets2,
         );
         eprintln!("Generating for {} (3/3)", desc);
@@ -264,24 +172,35 @@ fn criterion_benchmark(c: &mut Criterion) {
             .map(|sv| {
                 let mut s = S::new();
                 for i in sv.0.iter() {
-                    s.insert(*i);
+                    s.insert(i.clone());
                 }
                 Wrap(sv.clone(), Box::new(UnsafeCell::new(s)))
             })
-            .collect::<Vec<Wrap<_>>>();
+            .collect::<Vec<Wrap<_,_>>>();
         unsafe {
             c.bench_function_over_inputs(
                 &format!("{}/insert_remove", desc),
-                |b, &Wrap(ref sv, ref s)| bench_set_insert_remove::<S>(b, &mut *s.get(), &sv.0),
+                |b, &Wrap(ref sv, ref s)| bench_set_insert_remove::<T, S>(b, &mut *s.get(), &sv.0),
                 sets3,
             );
         }
     }
-    make_bench::<HashSet<u64>>(c, "Hashtable", &v1s);
-    make_bench::<BTreeSet<u64>>(c, "BTree", &v1s);
-    make_bench::<ARTSet<u64>>(c, "ART", &v1s);
-    make_bench::<MidARTSet<u64>>(c, "MidART", &v1s);
-    make_bench::<LargeARTSet<u64>>(c, "LargeART", &v1s);
+    macro_rules! bench_inner {
+        ($c:expr, $container:tt, $ivec:expr, $svec:expr) => {
+            {
+                make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
+                make_bench::<String, $container<String>>($c, format!("{}/String", stringify!($container)), $svec);
+            }
+        };
+    }
+    macro_rules! bench_all {
+        ($c:expr, $ivec:expr, $svec:expr, $( $container:tt ),+) => {
+            $(
+                bench_inner!($c, $container, $ivec, $svec);
+            )+
+        }
+    }
+    bench_all!(c, &v1s, &v2s, HashSet, BTreeSet, ARTSet, CachingARTSet);
 }
 
 criterion_group!(benches, criterion_benchmark);
