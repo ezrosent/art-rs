@@ -9,7 +9,7 @@ use std::collections::btree_set::BTreeSet;
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use radix_tree::{ARTSet, ArtElement, Digital, CachingARTSet, PrefixCache, RawART};
+use radix_tree::{ARTSet, ArtElement, CachingARTSet, Digital, PrefixCache, RawART};
 
 const RAND_SEED: [usize; 32] = [1; 32];
 
@@ -79,13 +79,20 @@ fn random_string_vec(max_len: usize, len: usize) -> Vec<String> {
     let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     (0..len.next_power_of_two())
         .map(|_| {
-            let s_len = rng.gen_range::<usize>(0, max_len);
-            String::from_utf8((0..s_len).map(|_| rng.gen_range::<u8>(0, 128)).collect()).unwrap()
+            let mlen = max_len as isize;
+            let s_len = mlen + rng.gen_range::<isize>(-mlen / 2, mlen / 2);
+            rng.gen_iter::<char>()
+                .take(s_len as usize)
+                .collect::<String>()
         })
         .collect()
 }
 
-fn bench_set_rand_int_lookup<T: for <'a> Digital<'a>, S: Set<T>>(b: &mut Bencher, contents: &S, lookups: &Vec<T>) {
+fn bench_set_rand_int_lookup<T: for<'a> Digital<'a>, S: Set<T>>(
+    b: &mut Bencher,
+    contents: &S,
+    lookups: &Vec<T>,
+) {
     assert!(lookups.len().is_power_of_two());
     let mut ix = 0;
     b.iter(|| {
@@ -95,7 +102,11 @@ fn bench_set_rand_int_lookup<T: for <'a> Digital<'a>, S: Set<T>>(b: &mut Bencher
     })
 }
 
-fn bench_set_insert_remove<T: Clone + for<'a> Digital<'a>, S: Set<T>>(b: &mut Bencher, contents: &mut S, lookups: &Vec<T>) {
+fn bench_set_insert_remove<T: Clone + for<'a> Digital<'a>, S: Set<T>>(
+    b: &mut Bencher,
+    contents: &mut S,
+    lookups: &Vec<T>,
+) {
     assert!(lookups.len().is_power_of_two());
     let mut ix = 0;
     b.iter(|| {
@@ -124,12 +135,16 @@ fn criterion_benchmark(c: &mut Criterion) {
         .collect();
 
     eprintln!("Generating Strings");
-    let v2s: Vec<SizeVec<String>> = [16 << 10, 64 << 20]
+    let v2s: Vec<SizeVec<String>> = [16 << 10, 1 << 20]
         .iter()
         .map(|size: &usize| SizeVec(random_string_vec(30, *size), random_string_vec(30, *size)))
         .collect();
 
-    fn make_bench<T: 'static + Clone + for<'a> Digital<'a>, S: Set<T> + 'static>(c: &mut Criterion, desc: String, inp: &Vec<SizeVec<T>>) {
+    fn make_bench<T: 'static + Clone + for<'a> Digital<'a>, S: Set<T> + 'static>(
+        c: &mut Criterion,
+        desc: String,
+        inp: &Vec<SizeVec<T>>,
+    ) {
         eprintln!("Generating for {} (1/3)", desc);
         struct Wrap<S, T>(SizeVec<S>, Box<T>);
         impl<S, T> Debug for Wrap<S, T> {
@@ -145,7 +160,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 }
                 Wrap(sv.clone(), Box::new(s))
             })
-            .collect::<Vec<Wrap<_,_>>>();
+            .collect::<Vec<Wrap<_, _>>>();
         c.bench_function_over_inputs(
             &format!("{}/lookup_hit", desc),
             |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<T, S>(b, &*s, &sv.0),
@@ -160,7 +175,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 }
                 Wrap(sv.clone(), Box::new(s))
             })
-            .collect::<Vec<Wrap<_,_>>>();
+            .collect::<Vec<Wrap<_, _>>>();
         c.bench_function_over_inputs(
             &format!("{}/lookup_miss", desc),
             |b, &Wrap(ref sv, ref s)| bench_set_rand_int_lookup::<T, S>(b, &*s, &sv.1),
@@ -176,7 +191,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                 }
                 Wrap(sv.clone(), Box::new(UnsafeCell::new(s)))
             })
-            .collect::<Vec<Wrap<_,_>>>();
+            .collect::<Vec<Wrap<_, _>>>();
         unsafe {
             c.bench_function_over_inputs(
                 &format!("{}/insert_remove", desc),
@@ -188,7 +203,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     macro_rules! bench_inner {
         ($c:expr, $container:tt, $ivec:expr, $svec:expr) => {
             {
-                make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
+                // make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
                 make_bench::<String, $container<String>>($c, format!("{}/String", stringify!($container)), $svec);
             }
         };
@@ -200,7 +215,7 @@ fn criterion_benchmark(c: &mut Criterion) {
             )+
         }
     }
-    bench_all!(c, &v1s, &v2s, HashSet, BTreeSet, ARTSet, CachingARTSet);
+    bench_all!(c, &v1s, &v2s, CachingARTSet, HashSet, BTreeSet, ARTSet);
 }
 
 criterion_group!(benches, criterion_benchmark);

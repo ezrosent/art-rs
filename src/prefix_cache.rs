@@ -201,7 +201,7 @@ mod dense_hash_set {
     {
         fn next_probe(hash: usize, i: usize) -> usize {
             // hash + i
-            hash + (i + i * i)/2
+            hash + (i + i * i) / 2
         }
 
         fn new() -> Self {
@@ -288,13 +288,11 @@ mod dense_hash_set {
                 return None;
             }
             let (_, b_opt) = self.seek(k);
-            b_opt.and_then(|b| {
-                unsafe {
-                    if (*b).is_null() {
-                        None
-                    } else {
-                        Some(&*b)
-                    }
+            b_opt.and_then(|b| unsafe {
+                if (*b).is_null() {
+                    None
+                } else {
+                    Some(&*b)
                 }
             })
         }
@@ -304,17 +302,16 @@ mod dense_hash_set {
                 return None;
             }
             let (_, b_opt) = self.seek(k);
-            b_opt.and_then(|b| {
-            unsafe  {
+            b_opt.and_then(|b| unsafe {
                 if (*b).is_null() {
                     None
                 } else {
                     let mut tomb = T::tombstone();
-                    mem::swap(&mut*b, &mut tomb);
+                    mem::swap(&mut *b, &mut tomb);
                     self.len -= 1;
                     Some(tomb)
                 }
-            }})
+            })
         }
 
         fn insert(&mut self, mut t: T) -> Result<(), T> {
@@ -341,7 +338,7 @@ mod dense_hash_set {
                     Ok(())
                 } else {
                     // t is already in the table, we simply swap in the new value
-                    mem::swap(&mut*bucket, &mut t);
+                    mem::swap(&mut *bucket, &mut t);
                     Err(t)
                 }
             }

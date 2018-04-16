@@ -178,29 +178,36 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 None => None,
                 Some(Ok(leaf_node)) => {
                     if (dont_check && digits.len() == consumed) || (*leaf_node).matches(k) {
+
                         Some(leaf_node)
                     } else {
+
                         None
                     }
                 }
                 Some(Err(inner_node)) => {
                     consumed = (*inner_node).consumed as usize;
                     if consumed >= digits.len() {
+
                         return None;
                     }
                     // handle prefixes now
                     (*inner_node)
                         .prefix_matches_optimistic(&digits[consumed..])
                         .and_then(|(dont_check_new, con)| {
+
                             consumed += con;
                             // let new_digits = &digits[consumed..];
                             if digits.len() == consumed {
+
                                 // Our digits were entirely consumed, but this is a non-leaf node.
                                 // That means our node is not present.
                                 return None;
                             }
                             with_node!(&*inner_node, nod, {
+
                                 nod.find_raw(digits[consumed]).and_then(|next_node| {
+
                                     lookup_raw_recursive(
                                         (&*next_node).to_marked(),
                                         k,
@@ -218,12 +225,18 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             let (elligible, opt) = self.hash_lookup(digits.as_slice());
             let node_ref = if let Some(ptr) = opt {
                 match ptr {
-                    Ok(leaf) => return if (*leaf).matches(k) { Some(leaf) } else { None },
+                    Ok(leaf) => return if (*leaf).matches(k) {
+                        Some(leaf)
+                    } else {
+                        None
+                    },
                     Err(node) => node,
                 }
             } else if C::COMPLETE && elligible && self.len > 1 {
+
                 return None;
             } else {
+
                 self.root.to_marked()
             };
             lookup_raw_recursive(node_ref, k, digits.as_slice(), 0, true)
@@ -280,9 +293,10 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             return Partial;
                                         }
                                         p_ref
-                                    },
-                                    Err(ref mut parent_ptr) =>
+                                    }
+                                    Err(ref mut parent_ptr) => {
                                         parent_ptr.get_mut().unwrap().err().unwrap()
+                                    }
                                 },
                                 node,
                                 {
@@ -371,8 +385,14 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 let mut replace = false;
                                 let mut ds = SmallVec::<[u8; 8]>::new();
                                 {
-                                    let _p_marked = match parent_ref { Ok(ref m) => m.clone(), Err(ref ptr) => ptr.to_marked() };
-                                    let pp = match parent_ref { Ok (ref m) => m.get().unwrap().err().unwrap(), Err(ref ptr) => ptr.get().unwrap().err().unwrap()};
+                                    let _p_marked = match parent_ref {
+                                        Ok(ref m) => m.clone(),
+                                        Err(ref ptr) => ptr.to_marked(),
+                                    };
+                                    let pp = match parent_ref {
+                                        Ok(ref m) => m.get().unwrap().err().unwrap(),
+                                        Err(ref ptr) => ptr.get().unwrap().err().unwrap(),
+                                    };
                                     if C::ENABLED && pp.consumed as usize <= target
                                         && target <= pp.consumed as usize + pp.count as usize
                                     {
@@ -490,11 +510,13 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             k,
                             marked,
                             Some(c_ptr),
-                            // curr_ptr.map(|x| (next_digit, x)),
-                            Some((next_digit, match curr_ptr {
-                                Some(x) => Err(x),
-                                None => Ok(curr),
-                            })),
+                            Some((
+                                next_digit,
+                                match curr_ptr {
+                                    Some(x) => Err(x),
+                                    None => Ok(curr),
+                                },
+                            )),
                             digits,
                             consumed,
                             target,
@@ -571,7 +593,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub unsafe fn insert_raw(&mut self, elt: T) -> Result<(), T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(elt.key().digits());
-
         unsafe fn insert_raw_recursive<T: Element, C: PrefixCache<T>>(
             curr: MarkedPtr<T>,
             mut e: T,
@@ -588,9 +609,11 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 let new_leaf = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
                 (*pptr.unwrap()) = new_leaf;
                 if C::ENABLED && digits.len() >= target && consumed <= target {
+
                     debug_assert!(buckets.lookup(&digits[0..target]).is_none());
                     buckets.insert(&digits[0..target], (*pptr.unwrap()).to_marked());
                 }
+
                 return Success;
             }
             match curr.get_raw().unwrap() {
@@ -609,6 +632,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     if leaf_node.matches(e.key()) {
                         // Found a matching leaf node. We swap in our value and return the old one.
                         leaf_node.replace_matching(&mut e);
+
                         return Replaced(e);
                     }
                     // found a leaf node, need to split it to a Node4 with two leaves
@@ -631,18 +655,22 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     {
                         buckets.insert(&digits[0..target], (*pp).to_marked());
                         debug_assert!((*pp).get().unwrap().is_err());
+
                     } else if C::ENABLED && digits.len() >= target && consumed <= target {
                         debug_assert!(buckets.lookup(&digits[0..target]).is_none());
                         buckets.insert(&digits[0..target], (*pp).to_marked());
+
                         // buckets.insert(&digits[0..target], new_leaf.to_marked());
                     }
 
                     if C::ENABLED && leaf_digits.len() >= target && consumed <= target {
+
                         buckets.insert(&leaf_digits[0..target], (*pp).to_marked());
                     }
                     if C::ENABLED && C::COMPLETE && leaf_digits.len() >= target
                         && consumed <= target
                     {
+
                         debug_assert!(buckets.lookup(&leaf_digits[0..target]).is_some())
                     }
                     // n4_raw has now replaced the leaf, we need to reinsert the leaf, along with
@@ -652,6 +680,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                   &leaf_digits[..],
                                   digits,
                                   consumed);
+
                     (*n4_raw)
                         .insert(leaf_digits[consumed + prefix_len], leaf_ptr, None)
                         .unwrap();
@@ -699,6 +728,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             nod.count = cmp::min(nod.count, PREFIX_LEN as u32);
                             if let Some(next_ptr) = nod.find_mut(d) {
                                 let pp = Some(next_ptr as *mut _);
+
                                 return insert_raw_recursive(
                                     next_ptr.to_marked(),
                                     e,
@@ -711,6 +741,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             }
                             let full = nod.is_full();
                             if C::ENABLED && full && pptr.is_none() {
+
                                 return Failure(e);
                             }
                             let c_ptr = ChildPtr::<T>::from_leaf(Box::into_raw(Box::new(e)));
@@ -720,7 +751,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 if nod.consumed as usize <= target
                                     && target <= nod.consumed as usize + nod.count as usize
                                 {
+
                                     if full {
+
                                         let marked_p = (*pptr.unwrap()).to_marked();
                                         buckets.insert(&digits[0..target], marked_p.clone());
                                     }
@@ -740,8 +773,10 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             panic!("Overwriting leaf insertion");
                                         }
                                     }
+
                                     buckets.insert(&digits[0..target], MarkedPtr::from_node(nod));
                                 } else if full && consumed <= target {
+
                                     let marked_p = (*pptr.unwrap()).to_marked();
                                     // If we were full we have to remap all leaves that are
                                     // children of nod to the new value.
@@ -767,11 +802,13 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                     );
                                 }
                             }
+
                             return Success;
                         });
                     } else {
                         let inner_d = inner_node.prefix[matched];
                         if pptr.is_none() {
+
                             return Failure(e);
                         }
                         // Case 4: Our inner node shares a non-matching prefix with the current node.
@@ -819,6 +856,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             make_node_with_prefix(&common_prefix_digits[..], consumed as u32);
                         inner_node.consumed += n4.count + 1;
                         debug_assert_eq!(n4.count as usize, common_prefix_digits.len());
+                        let update_cache_inner = C::ENABLED && consumed <= target
+                            && target <= consumed + n4.count as usize;
                         consumed += n4.count as usize;
                         let by = matched + 1;
                         adjust_prefix(inner_node, by, min_ref, consumed);
@@ -835,14 +874,15 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                         // `inner` as a child of n4.
                         let pp = pptr.unwrap();
                         mem::swap(&mut *pp, &mut n4_cptr);
-                        if C::ENABLED && consumed <= target
-                            && target <= consumed + (*n4_raw).count as usize
-                        {
+                        if update_cache_inner {
+
                             buckets.insert(&digits[0..target], (*pp).to_marked());
                             debug_assert!((*pp).get().unwrap().is_err());
                         } else if C::ENABLED && digits.len() >= target && consumed <= target {
+
                             buckets.insert(&digits[0..target], (*pp).to_marked());
                         }
+
                         (*n4_raw).insert(inner_d, n4_cptr, None).unwrap()
                     }
                 }
@@ -854,8 +894,10 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 let (node_ref, consumed, pptr) = {
                     let (_, opt) = self.hash_lookup(digits.as_slice());
                     if let Some(Err(inner)) = opt {
+
                         (inner, self.prefix_target, None)
                     } else {
+
                         let root_alias = Some(&mut self.root as *mut _);
                         (self.root.to_marked(), 0, root_alias)
                     }
@@ -869,7 +911,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     &mut self.buckets,
                     self.prefix_target,
                 ) {
-                    PartialResult::Failure(e) => e,
+                    PartialResult::Failure(e) =>  e,
                     PartialResult::Success => {
                         self.len += 1;
                         return Ok(());
@@ -891,10 +933,14 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 self.prefix_target,
             ) {
                 PartialResult::Success => {
+
                     self.len += 1;
                     Ok(())
                 }
-                PartialResult::Replaced(t) => Err(t),
+                PartialResult::Replaced(t) => {
+
+                    Err(t)
+                },
                 PartialResult::Failure(_) => unreachable!(),
             }
         } else {
@@ -924,6 +970,8 @@ mod tests {
     use super::*;
     use super::super::rand;
     use super::super::rand::Rng;
+    // Use StdRng::rom_seed to debug test failures with deterministic inputs
+    // use super::super::rand::{Rng, SeedableRng, StdRng};
     use std::fmt::{Debug, Error, Formatter};
 
     macro_rules! for_each_set {
@@ -943,11 +991,13 @@ mod tests {
 
     fn random_string_vec(max_len: usize, len: usize) -> Vec<String> {
         let mut rng = rand::thread_rng();
-        (0..len)
+        (0..len.next_power_of_two())
             .map(|_| {
-                let s_len = rng.gen_range::<usize>(0, max_len);
-                String::from_utf8((0..s_len).map(|_| rng.gen_range::<u8>(0, 128)).collect())
-                    .unwrap()
+                let mlen = max_len as isize;
+                let s_len = mlen + rng.gen_range::<isize>(-mlen / 2, mlen / 2);
+                rng.gen_iter::<char>()
+                    .take(s_len as usize)
+                    .collect::<String>()
             })
             .collect()
     }
@@ -1056,14 +1106,63 @@ mod tests {
     }
 
     #[test]
+    fn string_set_insert_remove() {
+        for_each_set!(
+            s,
+            {
+                let v1 = random_string_vec(30, 1 << 18);
+                {
+                    let mut failed = false;
+                    for (i, item) in v1.iter().enumerate() {
+                        s.add(item.clone());
+                        if !s.contains(item) {
+                            failed = true;
+                            eprintln!(
+                                "[{}] lookup failed immediately for {:?}",
+                                i,
+                                DebugVal(item.clone())
+                            );
+                        }
+                    }
+                    assert!(!failed);
+                }
+                let mut ix = 0;
+                for t in 0..(1<<18) {
+                    s.add(v1[ix].clone());
+                    assert!(s.contains(&v1[ix]));
+                    ix += 1;
+                    ix %= 1 << 18;
+                    s.remove(&v1[ix]);
+                    ix += 1;
+                    ix %= 1 << 18;
+                    assert!(!s.contains(&v1[ix]), "failed assertion at t={} str={:?}", t, DebugVal(v1[ix].clone()));
+                }
+            },
+            CachingARTSet - String,
+            ARTSet - String
+        );
+    }
+
+    #[test]
     fn string_set_behavior() {
         for_each_set!(
             s,
             {
-                let mut v1 = random_string_vec(64, 1 << 18);
-                for item in v1.iter() {
-                    s.add(item.clone());
-                    assert!(s.contains(item));
+                let mut v1 = random_string_vec(30, 1 << 18);
+                {
+                    let mut failed = false;
+                    for (i, item) in v1.iter().enumerate() {
+                        s.add(item.clone());
+                        if !s.contains(item) {
+                            failed = true;
+                            eprintln!(
+                                "[{}] lookup failed immediately for {:?}",
+                                i,
+                                DebugVal(item.clone())
+                            );
+                        }
+                    }
+                    assert!(!failed);
                 }
                 let mut missing = Vec::new();
                 for item in v1.iter() {
@@ -1113,8 +1212,8 @@ mod tests {
                     );
                 }
             },
-            ARTSet - String,
-            CachingARTSet - String
+            CachingARTSet - String,
+            ARTSet - String
         );
     }
 
