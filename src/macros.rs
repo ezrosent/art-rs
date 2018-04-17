@@ -47,3 +47,14 @@ macro_rules! with_node {
         with_node_inner!($base_node, $nod, $body, RawRef, $ty)
     };
 }
+
+macro_rules! trace {
+    ($b:expr, $str:expr, $( $arg:expr ),+) => {
+        #[cfg(debug_assertions)]
+        {
+            if $b { eprintln!("{} {} {}", file!(), line!(), format!($str, $( $arg ),*)) }
+        }
+    };
+    ($b:expr, $str:expr) => { trace!($b, "{}", $str) };
+    ($b:expr) => { trace!($b, "") };
+}

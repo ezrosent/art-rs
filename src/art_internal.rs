@@ -225,7 +225,12 @@ impl RawNode<()> {
         consumed: usize,
         _marker: PhantomData<T>,
     ) -> (usize, Option<*const T>) {
-        debug_assert!(consumed < digits.len());
+        debug_assert!(
+            consumed < digits.len(),
+            "consumed={}, digits={:?}",
+            consumed,
+            digits
+        );
         let count = cmp::min(self.count as usize, PREFIX_LEN);
         for i in 0..count {
             if digits[consumed + i] != self.prefix[i] {
@@ -512,52 +517,57 @@ mod node_variants {
     // (very) ad-hoc polymorphism!
     macro_rules! n416_delete {
         ($slf: expr, $d: expr) => {
-            match $slf.find_internal($d) {
-                None => DeleteResult::Failure,
-                Some((ix, ptr)) => {
-                    let deleted = (*ptr).swap_null();
-                    if ix + 1 < $slf.node.keys[..].len() {
-                        ptr::copy(
-                            &$slf.node.keys[ix + 1],
-                            &mut $slf.node.keys[ix],
-                            $slf.children as usize - ix,
-                        );
-                        ptr::copy(
-                            &$slf.node.ptrs[ix + 1],
-                            &mut $slf.node.ptrs[ix],
-                            $slf.children as usize - ix,
-                        );
-                    }
-                    debug_assert!($slf.children > 0);
-                    $slf.children -= 1;
-                    ptr::write(
-                        &mut $slf.node.ptrs[$slf.children as usize],
-                        ChildPtr::null(),
-                    );
-                    if $slf.children == 1 {
-                        let mut c_ptr = ChildPtr::null();
-                        debug_assert!(
-                            !$slf.node.ptrs[0].is_null(),
-                            "{:?} Uh oh! {:?}",
-                            $slf as *const _,
-                            $slf
-                        );
-                        mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
-                        DeleteResult::Singleton {
-                            deleted: deleted,
-                            last: c_ptr,
-                            last_d: $slf.node.keys[0],
+            {
+                let _res = match $slf.find_internal($d) {
+                    None => DeleteResult::Failure,
+                    Some((ix, ptr)) => {
+                        let deleted = (*ptr).swap_null();
+                        //  trace!(true, "d={} slf={:?}", $d, $slf);
+                        if ix + 1 < $slf.node.keys[..].len() {
+                            ptr::copy(
+                                &$slf.node.keys[ix + 1],
+                                &mut $slf.node.keys[ix],
+                                $slf.children as usize - ix,
+                            );
+                            ptr::copy(
+                                &$slf.node.ptrs[ix + 1],
+                                &mut $slf.node.ptrs[ix],
+                                $slf.children as usize - ix,
+                            );
                         }
-                    } else {
-                        DeleteResult::Success(deleted)
+                        debug_assert!($slf.children > 0);
+                        $slf.children -= 1;
+                        ptr::write(
+                            &mut $slf.node.ptrs[$slf.children as usize],
+                            ChildPtr::null(),
+                        );
+                        if $slf.children == 1 {
+                            let mut c_ptr = ChildPtr::null();
+                            debug_assert!(
+                                !$slf.node.ptrs[0].is_null(),
+                                "{:?} Uh oh! {:?}",
+                                $slf as *const _,
+                                $slf
+                            );
+                            mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
+                            DeleteResult::Singleton {
+                                deleted: deleted,
+                                last: c_ptr,
+                                last_d: $slf.node.keys[0],
+                            }
+                        } else {
+                            DeleteResult::Success(deleted)
+                        }
                     }
-                }
+                };
+                debug_assert!($slf.find_internal($d).is_none());
+                _res
             }
         };
     }
     impl<T> ::std::fmt::Debug for Node16<T> {
         fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
-            write!(f, "Node4({:?}, {:?})", self.keys, &self.ptrs[..])
+            write!(f, "Node16({:?}, {:?})", self.keys, &self.ptrs[..])
         }
     }
 
