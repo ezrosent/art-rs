@@ -107,6 +107,8 @@ fn bench_set_insert_remove<T: Clone + for<'a> Digital<'a>, S: Set<T>>(
     contents: &mut S,
     lookups: &Vec<T>,
 ) {
+    // TODO maybe not the best string benchmark? after the first iteration all removes fail and all
+    // inserts succeed. Maybe add an offset that periodically gets incremented?
     assert!(lookups.len().is_power_of_two());
     let mut ix = 0;
     b.iter(|| {
@@ -135,7 +137,7 @@ fn criterion_benchmark(c: &mut Criterion) {
         .collect();
 
     eprintln!("Generating Strings");
-    let v2s: Vec<SizeVec<String>> = [16 << 10, 1 << 20]
+    let v2s: Vec<SizeVec<String>> = [/* 16 << 10, */ 1 << 20]
         .iter()
         .map(|size: &usize| SizeVec(random_string_vec(30, *size), random_string_vec(30, *size)))
         .collect();
@@ -203,7 +205,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     macro_rules! bench_inner {
         ($c:expr, $container:tt, $ivec:expr, $svec:expr) => {
             {
-                // make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
+                make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
                 make_bench::<String, $container<String>>($c, format!("{}/String", stringify!($container)), $svec);
             }
         };

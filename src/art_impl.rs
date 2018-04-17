@@ -126,7 +126,7 @@ pub struct RawART<T: Element, C: PrefixCache<T>> {
 
 impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub fn new() -> Self {
-        RawART::with_prefix_buckets(4)
+        RawART::with_prefix_buckets(6)
     }
 
     pub fn with_prefix_buckets(prefix_len: usize) -> Self {
@@ -509,7 +509,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             // need to construct new digits
                                             d_slice = ds.as_slice();
                                         }
-                                        if consumed == target {
+                                        if consumed <= target {
                                             // there's an edge case here. If consumed == target,
                                             // and digits is of lenght >= target, then the promoted
                                             // node will not have the same target-length prefix as
