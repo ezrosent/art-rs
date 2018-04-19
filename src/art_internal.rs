@@ -87,7 +87,7 @@ impl<T> ::std::fmt::Debug for MarkedPtr<T> {
 
 impl<T> ::std::fmt::Debug for ChildPtr<T> {
     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
-        write!(f, "ChildPtr({:?})", (self.0).0)
+        write!(f, "ChildPtr({:?})", (self.0).0 as *mut ())
     }
 }
 
@@ -1114,17 +1114,18 @@ mod node_variants {
     pub struct Node256<T> {
         ptrs: [ChildPtr<T>; 256],
     }
+    impl<T> ::std::fmt::Debug for Node48<T> {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
+            write!(f, "Node48(keys={:?},ptrs={:?})", &self.keys[..], &self.ptrs[..])
+        }
+    }
 
     impl<T> ::std::fmt::Debug for Node256<T> {
         fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
-            let mut ix = 0;
             let v: Vec<_> = self.ptrs
                 .iter()
-                .map(|cp| {
-                    let res = (ix, cp);
-                    ix += 1;
-                    res
-                })
+                .enumerate()
+                .filter(|&(_, cp)| !cp.is_null())
                 .collect();
             write!(f, "Node256({:?})", v)
         }

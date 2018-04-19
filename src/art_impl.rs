@@ -11,6 +11,8 @@ use super::prefix_cache::{HashSetPrefixCache, NullBuckets};
 use super::smallvec::SmallVec;
 pub use super::prefix_cache::PrefixCache;
 
+const BAD_DIGITS: [u8; 149] = [245, 135, 131, 129, 244, 178, 172, 139, 242, 161, 188, 142, 244, 163, 158, 175, 241, 145, 165, 178, 241, 180, 160, 189, 242, 188, 173, 170, 241, 167, 131, 136, 242, 172, 180, 186, 241, 150, 165, 135, 241, 187, 168, 190, 243, 179, 185, 136, 241, 186, 149, 136, 243, 139, 165, 153, 242, 168, 163, 174, 243, 165, 185, 185, 244, 144, 177, 184, 243, 168, 130, 176, 230, 171, 179, 229, 151, 180, 243, 138, 152, 139, 243, 192, 140, 186, 241, 168, 167, 163, 241, 162, 137, 134, 242, 148, 142, 163, 241, 181, 138, 151, 244, 143, 181, 185, 244, 144, 133, 131, 243, 161, 151, 177, 241, 146, 159, 175, 241, 166, 166, 129, 242, 183, 180, 188, 244, 135, 149, 168, 243, 184, 158, 134, 243, 144, 161, 157, 227, 141, 180, 225, 187, 143, 243, 174, 186, 165, 0];
+
 pub struct ArtElement<T: for<'a> Digital<'a> + PartialOrd>(T);
 
 impl<T: for<'a> Digital<'a> + PartialOrd> ArtElement<T> {
@@ -168,7 +170,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub unsafe fn lookup_raw(&self, k: &T::Key) -> Option<*mut T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
-        let _check = false; // &digits[..] == &BAD_DIGITS[..];
+        let _check = &digits[..] == &BAD_DIGITS[..];
         trace!(_check, "lookup_raw");
         unsafe fn lookup_raw_recursive<T: Element>(
             curr: MarkedPtr<T>,
@@ -177,14 +179,14 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             mut consumed: usize,
             dont_check: bool,
         ) -> Option<*mut T> {
-            let _check = false; // digits == &BAD_DIGITS[..];
+            let _check = digits == &BAD_DIGITS[..];
             match curr.get_raw() {
                 None => None,
                 Some(Ok(leaf_node)) => {
                     if (dont_check && digits.len() == consumed) || (*leaf_node).matches(k) {
                         trace!(
                             _check,
-                            "dont_check={}, consumed_check={}, matches={}",
+                            "FOUND dont_check={}, consumed_check={}, matches={}",
                             dont_check,
                             digits.len() == consumed,
                             (*leaf_node).matches(k)
@@ -197,8 +199,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 }
                 Some(Err(inner_node)) => {
                     consumed = (*inner_node).consumed as usize;
+                    trace!(_check, "[lookup, d={}] found an inner node {:?}@{:?}", digits[consumed], *inner_node, inner_node);
                     if consumed >= digits.len() {
-                        trace!(_check);
+                        trace!(_check, "consumed too big");
                         return None;
                     }
                     // handle prefixes now
@@ -265,8 +268,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
         use self::PartialDeleteResult::*;
-        let _check = false; // &digits[..] == &BAD_DIGITS[..];
-        trace!(_check, "delete_raw");
+        let _check = &digits[..] == &BAD_DIGITS[..];
+        trace!(_check, "delete_raw {:?}", &digits[..]);
         unsafe fn delete_raw_recursive<T: Element, C: PrefixCache<T>>(
             k: &T::Key,
             mut curr: MarkedPtr<T>,
@@ -279,7 +282,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             is_root: bool,
             // return the deleted node
         ) -> PartialDeleteResult<T> {
-            let _check = false; // digits == &BAD_DIGITS[..];
+            let _check = digits == &BAD_DIGITS[..];
             use self::PartialDeleteResult::*;
             if curr.is_null() {
                 return Failure;
@@ -310,7 +313,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         let p_ref = marked_parent.get_mut().unwrap().err().unwrap();
                                         trace!(_check, "{:?}", p_ref);
                                         if p_ref.children == 2 {
-                                            trace!(_check);
+                                            trace!(_check, "[delete] returning partial");
                                             return Partial;
                                         }
                                         p_ref
@@ -406,6 +409,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 }
                             );
                             if let Some((mut c_ptr, last_d)) = asgn {
+                                let _check_2 = &digits[0..3] == &BAD_DIGITS[0..3];
                                 trace!(_check);
                                 // we are promoting a "last" so we must increase its prefix
                                 // length
@@ -448,7 +452,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         );
                                     }
                                     if let Err(inner) = c_ptr.get_mut().unwrap() {
-                                        trace!(_check);
+                                        let from = format!("{:?}", inner);
                                         // The "last" node that we are promoting is an interior
                                         // node. As a result, we have to modify its prefix and
                                         // potentially insert it into the prefix cache.
@@ -465,6 +469,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             prefix_digits.as_slice(),
                                             prefix_digits.len() as u32,
                                         );
+                                        trace!(_check_2, "[last_d={}] updating inner node @{:?} {} => {:?} (min={:?})",
+                                               last_d, inner as *const _, from, inner,
+                                               with_node!(inner, nod, nod.get_min().unwrap().key().digits().collect::<Vec<u8>>(), T));
                                         debug_assert_eq!(inner.consumed, pp.consumed);
                                         if C::ENABLED && inner.consumed as usize <= target
                                             && target
@@ -537,7 +544,19 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     }
                 }
                 Err(inner_node) => {
-                    trace!(_check);
+                    #[cfg(debug_assertions)]
+                    {
+                        with_node!(inner_node, nod, {
+                            let _leaf = nod.get_min().unwrap();
+                            let mut _leaf_ds = Vec::with_capacity(digits.len());
+                            _leaf_ds.extend(_leaf.key().digits());
+                            trace!(_check, "[delete, d={}] found an inner node {:?}@{:?}\n\t(leaf_ds={:?})",
+                                   digits[nod.consumed as usize],
+                                   nod,
+                                   inner_node as *const RawNode<()>,
+                                   _leaf_ds);
+                        }, T);
+                    }
                     debug_assert!(
                         inner_node.consumed as usize <= digits.len(),
                         "inner_node.consumed={} too high, nod={:?}",
@@ -557,7 +576,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                         debug_assert!(digits.len() > matched);
                         Some((inner_node as *mut RawNode<()>, matched))
                     } else {
-                        trace!(_check);
+                        trace!(_check, "delete failing consumed={}", consumed);
                         // prefix was not a match, the key is not here
                         return Failure;
                     }
@@ -617,17 +636,28 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 trace!(_check, "cache hit");
                 match ptr {
                     Ok(_leaf) => Partial,
-                    Err(inner) => delete_raw_recursive(
-                        k,
-                        inner,
-                        None,
-                        None,
-                        &digits[..],
-                        0,
-                        self.prefix_target,
-                        &mut self.buckets,
-                        false,
-                    ),
+                    Err(inner) => {
+                        #[cfg(debug_assertions)]
+                        with_node!(inner.get().unwrap().err().unwrap(), node, {
+                            let min = node.get_min().unwrap();
+                            let mut min_ds = SmallVec::<[u8; 10]>::new();
+                            min_ds.extend(min.key().digits());
+                            if _check {
+                                assert_eq!(&min_ds[0..self.prefix_target-1], &digits[0..self.prefix_target-1]);
+                            }
+                        }, T);
+                        delete_raw_recursive(
+                            k,
+                            inner,
+                            None,
+                            None,
+                            &digits[..],
+                            0,
+                            self.prefix_target,
+                            &mut self.buckets,
+                            false,
+                        )
+                    },
                 }
             } else if C::COMPLETE && elligible && self.len > 1 {
                 return None;
@@ -647,7 +677,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 self.prefix_target,
                 &mut self.buckets,
                 true,
-            );
+                );
         }
         match res {
             Success(x) => {
@@ -1250,12 +1280,12 @@ mod tests {
                         break;
                     }
                 }
-                for i in v2.iter() {
+                for (t, i) in v2.iter().enumerate() {
                     s.remove(i);
                     assert!(
                         !s.contains(i),
-                        "Deletion failed immediately for {:?}",
-                        DebugVal(i.clone())
+                        "[{}] Deletion failed immediately for {:?}",
+                        t, DebugVal(i.clone())
                     );
                 }
                 let mut failed = false;
