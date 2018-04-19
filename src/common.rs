@@ -15,6 +15,7 @@ use super::byteorder::{BigEndian, ByteOrder};
 pub trait Digital<'a> {
     // TODO: consider providing a more efficient interface here (e.g. passing a slice directly)
     type I: Iterator<Item = u8> + 'a;
+    const STOP_CHARACTER: Option<u8> = None;
     fn digits(&'a self) -> Self::I;
 }
 
@@ -190,6 +191,7 @@ impl<I: Iterator<Item = u8>> Iterator for NullTerminate<I> {
 
 impl<'a> Digital<'a> for str {
     type I = NullTerminate<str::Bytes<'a>>;
+    const STOP_CHARACTER: Option<u8> = Some(0);
     fn digits(&'a self) -> Self::I {
         NullTerminate::new(self.bytes())
     }
@@ -197,6 +199,7 @@ impl<'a> Digital<'a> for str {
 
 impl<'a> Digital<'a> for String {
     type I = NullTerminate<str::Bytes<'a>>;
+    const STOP_CHARACTER: Option<u8> = Some(0);
     fn digits(&'a self) -> Self::I {
         NullTerminate::new(self.as_str().bytes())
     }
