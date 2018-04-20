@@ -550,6 +550,9 @@ mod node_variants {
                                 $slf
                             );
                             mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
+
+                            debug_assert!(Some($slf.node.keys[0]) != T::Key::STOP_CHARACTER ||
+                                          c_ptr.get().unwrap().is_ok(), "Singleton is stop {:#?}", $slf);
                             DeleteResult::Singleton {
                                 deleted: deleted,
                                 last: c_ptr,
@@ -672,6 +675,7 @@ mod node_variants {
             pptr: Option<*mut ChildPtr<T>>,
         ) -> Result<(), ChildPtr<T>> {
             debug_assert!(self.find_raw(d).is_none());
+            debug_assert!(Some(d) != T::Key::STOP_CHARACTER || ptr.get().unwrap().is_ok());
             if self.children == 4 {
                 if let Some(pp) = pptr {
                     let new_node = &mut *Box::into_raw(Box::new(RawNode {
@@ -823,6 +827,7 @@ mod node_variants {
             ptr: ChildPtr<T>,
             pptr: Option<*mut ChildPtr<T>>,
         ) -> Result<(), ChildPtr<T>> {
+            debug_assert!(Some(d) != T::Key::STOP_CHARACTER || ptr.get().unwrap().is_ok());
             debug_assert!(self.find_raw(d).is_none());
             let mask = (1 << (self.children as usize)) - 1;
             if self.children == 16 {
@@ -907,13 +912,12 @@ mod node_variants {
 
     impl<T> RawNode<Node48<T>> {
         unsafe fn get_min_inner(&self) -> Option<(usize, *mut ChildPtr<T>)> {
-            for i in 0..256 {
-                let d = self.node.keys[i];
-                if d == 0 {
+            for d in 0..256 {
+                let i = self.node.keys[d];
+                if i == 0 {
                     continue;
                 }
-                let ix = d as usize - 1;
-                return Some((ix, &self.node.ptrs[ix] as *const _ as *mut _));
+                return Some((d, &self.node.ptrs[i as usize - 1] as *const _ as *mut _));
             }
             None
             // potentially optimized solution below:
@@ -1016,6 +1020,8 @@ mod node_variants {
                     if self.children == 1 {
                         // TODO remove the first entry, it isn't required
                         let (ix, or_ptr) = self.get_min_inner().expect("Should be one more child");
+                        debug_assert!(Some(ix) != T::Key::STOP_CHARACTER.map(|x| x as usize) ||
+                                      (*or_ptr).get().unwrap().is_ok(), "Singleton is stop {:#?}", self);
                         self.node.keys[ix] = 0; // not really necessary
                         DeleteResult::Singleton {
                             deleted: deleted,
@@ -1035,6 +1041,7 @@ mod node_variants {
             ptr: ChildPtr<T>,
             pptr: Option<*mut ChildPtr<T>>,
         ) -> Result<(), ChildPtr<T>> {
+            debug_assert!(Some(d) != T::Key::STOP_CHARACTER || ptr.get().unwrap().is_ok());
             debug_assert!(self.find_raw(d).is_none());
             self.state_valid();
             debug_assert!(self.children <= 48);
@@ -1188,10 +1195,15 @@ mod node_variants {
             self.children -= 1;
             if self.children == 1 {
                 for i in 0..256 {
+                    debug_assert!(self.node.ptrs[i].is_null() ||
+                                  Some(i) != T::Key::STOP_CHARACTER.map(|x| x as usize) ||
+                                  self.node.ptrs[i].get().unwrap().is_ok(),
+                                  "Singleton is stop {:#?}", self);
                     let node = &mut self.node.ptrs[i];
                     if node.is_null() {
                         continue;
                     }
+
                     return DeleteResult::Singleton {
                         deleted: deleted,
                         last: node.swap_null(),
@@ -1209,6 +1221,7 @@ mod node_variants {
             ptr: ChildPtr<T>,
             _p: Option<*mut ChildPtr<T>>,
         ) -> Result<(), ChildPtr<T>> {
+            debug_assert!(Some(d) != T::Key::STOP_CHARACTER || ptr.get().unwrap().is_ok());
             debug_assert!(self.find_raw(d).is_none(), "d={:?} IN {:?}", d, self);
             debug_assert!(self.children <= 256);
             debug_assert!(self.node.ptrs[d as usize].is_null());

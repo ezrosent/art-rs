@@ -452,6 +452,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                         );
                                     }
                                     if let Err(inner) = c_ptr.get_mut().unwrap() {
+                                        debug_assert!(Some(last_d) != T::Key::STOP_CHARACTER);
                                         let from = format!("{:?}", inner);
                                         // The "last" node that we are promoting is an interior
                                         // node. As a result, we have to modify its prefix and
