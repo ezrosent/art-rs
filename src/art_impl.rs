@@ -11,8 +11,6 @@ use super::prefix_cache::{HashSetPrefixCache, NullBuckets};
 use super::smallvec::SmallVec;
 pub use super::prefix_cache::PrefixCache;
 
-const BAD_DIGITS: [u8; 149] = [245, 135, 131, 129, 244, 178, 172, 139, 242, 161, 188, 142, 244, 163, 158, 175, 241, 145, 165, 178, 241, 180, 160, 189, 242, 188, 173, 170, 241, 167, 131, 136, 242, 172, 180, 186, 241, 150, 165, 135, 241, 187, 168, 190, 243, 179, 185, 136, 241, 186, 149, 136, 243, 139, 165, 153, 242, 168, 163, 174, 243, 165, 185, 185, 244, 144, 177, 184, 243, 168, 130, 176, 230, 171, 179, 229, 151, 180, 243, 138, 152, 139, 243, 192, 140, 186, 241, 168, 167, 163, 241, 162, 137, 134, 242, 148, 142, 163, 241, 181, 138, 151, 244, 143, 181, 185, 244, 144, 133, 131, 243, 161, 151, 177, 241, 146, 159, 175, 241, 166, 166, 129, 242, 183, 180, 188, 244, 135, 149, 168, 243, 184, 158, 134, 243, 144, 161, 157, 227, 141, 180, 225, 187, 143, 243, 174, 186, 165, 0];
-
 pub struct ArtElement<T: for<'a> Digital<'a> + PartialOrd>(T);
 
 impl<T: for<'a> Digital<'a> + PartialOrd> ArtElement<T> {
@@ -170,7 +168,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub unsafe fn lookup_raw(&self, k: &T::Key) -> Option<*mut T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
-        let _check = &digits[..] == &BAD_DIGITS[..];
+        let _check = false;
         trace!(_check, "lookup_raw");
         unsafe fn lookup_raw_recursive<T: Element>(
             curr: MarkedPtr<T>,
@@ -179,7 +177,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             mut consumed: usize,
             dont_check: bool,
         ) -> Option<*mut T> {
-            let _check = digits == &BAD_DIGITS[..];
+            let _check = false;
             match curr.get_raw() {
                 None => None,
                 Some(Ok(leaf_node)) => {
@@ -268,7 +266,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
         use self::PartialDeleteResult::*;
-        let _check = &digits[..] == &BAD_DIGITS[..];
+        let _check = false;
         trace!(_check, "delete_raw {:?}", &digits[..]);
         unsafe fn delete_raw_recursive<T: Element, C: PrefixCache<T>>(
             k: &T::Key,
@@ -282,7 +280,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
             is_root: bool,
             // return the deleted node
         ) -> PartialDeleteResult<T> {
-            let _check = digits == &BAD_DIGITS[..];
+            let _check = false;
             use self::PartialDeleteResult::*;
             if curr.is_null() {
                 return Failure;
@@ -409,7 +407,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                 }
                             );
                             if let Some((mut c_ptr, last_d)) = asgn {
-                                let _check_2 = &digits[0..3] == &BAD_DIGITS[0..3];
+                                let _check_2 = true;
                                 trace!(_check);
                                 // we are promoting a "last" so we must increase its prefix
                                 // length
@@ -453,7 +451,6 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                     }
                                     if let Err(inner) = c_ptr.get_mut().unwrap() {
                                         debug_assert!(Some(last_d) != T::Key::STOP_CHARACTER);
-                                        let from = format!("{:?}", inner);
                                         // The "last" node that we are promoting is an interior
                                         // node. As a result, we have to modify its prefix and
                                         // potentially insert it into the prefix cache.
@@ -470,8 +467,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             prefix_digits.as_slice(),
                                             prefix_digits.len() as u32,
                                         );
-                                        trace!(_check_2, "[last_d={}] updating inner node @{:?} {} => {:?} (min={:?})",
-                                               last_d, inner as *const _, from, inner,
+                                        trace!(_check_2, "[last_d={}] updating inner node @{:?} {:?} (min={:?})",
+                                               last_d, inner as *const _, inner,
                                                with_node!(inner, nod, nod.get_min().unwrap().key().digits().collect::<Vec<u8>>(), T));
                                         debug_assert_eq!(inner.consumed, pp.consumed);
                                         if C::ENABLED && inner.consumed as usize <= target
