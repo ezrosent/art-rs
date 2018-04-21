@@ -1050,9 +1050,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
 mod tests {
     use super::*;
     use super::super::rand;
-    // use super::super::rand::Rng;
+    use super::super::rand::Rng;
     // Use StdRng::rom_seed to debug test failures with deterministic inputs
-    use super::super::rand::{Rng, SeedableRng, StdRng};
+    // use super::super::rand::{Rng, SeedableRng, StdRng};
     use std::fmt::{Debug, Error, Formatter};
 
     macro_rules! for_each_set {
@@ -1071,8 +1071,10 @@ mod tests {
     }
 
     fn random_string_vec(max_len: usize, len: usize) -> Vec<String> {
-        const RAND_SEED: [usize; 32] = [1; 32];
-        let mut rng = StdRng::from_seed(&RAND_SEED[..]);
+        // For deterministic vecs:
+        // const RAND_SEED: [usize; 32] = [1; 32];
+        // let mut rng = StdRng::from_seed(&RAND_SEED[..]);
+        let mut rng = rand::thread_rng();
         (0..len.next_power_of_two())
             .map(|_| {
                 let mlen = max_len as isize;
