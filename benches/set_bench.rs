@@ -203,12 +203,14 @@ fn criterion_benchmark(c: &mut Criterion) {
         }
     }
     macro_rules! bench_inner {
-        ($c:expr, $container:tt, $ivec:expr, $svec:expr) => {
-            {
-                make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
-                make_bench::<String, $container<String>>($c, format!("{}/String", stringify!($container)), $svec);
-            }
-        };
+        ($c: expr, $container: tt, $ivec: expr, $svec: expr) => {{
+            make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
+            make_bench::<String, $container<String>>(
+                $c,
+                format!("{}/String", stringify!($container)),
+                $svec,
+            );
+        }};
     }
     macro_rules! bench_all {
         ($c:expr, $ivec:expr, $svec:expr, $( $container:tt ),+) => {

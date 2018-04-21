@@ -197,7 +197,13 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 }
                 Some(Err(inner_node)) => {
                     consumed = (*inner_node).consumed as usize;
-                    trace!(_check, "[lookup, d={}] found an inner node {:?}@{:?}", digits[consumed], *inner_node, inner_node);
+                    trace!(
+                        _check,
+                        "[lookup, d={}] found an inner node {:?}@{:?}",
+                        digits[consumed],
+                        *inner_node,
+                        inner_node
+                    );
                     if consumed >= digits.len() {
                         trace!(_check, "consumed too big");
                         return None;
@@ -467,9 +473,23 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                                             prefix_digits.as_slice(),
                                             prefix_digits.len() as u32,
                                         );
-                                        trace!(_check_2, "[last_d={}] updating inner node @{:?} {:?} (min={:?})",
-                                               last_d, inner as *const _, inner,
-                                               with_node!(inner, nod, nod.get_min().unwrap().key().digits().collect::<Vec<u8>>(), T));
+                                        trace!(
+                                            _check_2,
+                                            "[last_d={}] updating inner node @{:?} {:?} (min={:?})",
+                                            last_d,
+                                            inner as *const _,
+                                            inner,
+                                            with_node!(
+                                                inner,
+                                                nod,
+                                                nod.get_min()
+                                                    .unwrap()
+                                                    .key()
+                                                    .digits()
+                                                    .collect::<Vec<u8>>(),
+                                                T
+                                            )
+                                        );
                                         debug_assert_eq!(inner.consumed, pp.consumed);
                                         if C::ENABLED && inner.consumed as usize <= target
                                             && target
@@ -544,16 +564,21 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 Err(inner_node) => {
                     #[cfg(debug_assertions)]
                     {
-                        with_node!(inner_node, nod, {
-                            let _leaf = nod.get_min().unwrap();
-                            let mut _leaf_ds = Vec::with_capacity(digits.len());
-                            _leaf_ds.extend(_leaf.key().digits());
-                            trace!(_check, "[delete, d={}] found an inner node {:?}@{:?}\n\t(leaf_ds={:?})",
+                        with_node!(
+                            inner_node,
+                            nod,
+                            {
+                                let _leaf = nod.get_min().unwrap();
+                                let mut _leaf_ds = Vec::with_capacity(digits.len());
+                                _leaf_ds.extend(_leaf.key().digits());
+                                trace!(_check, "[delete, d={}] found an inner node {:?}@{:?}\n\t(leaf_ds={:?})",
                                    digits[nod.consumed as usize],
                                    nod,
                                    inner_node as *const RawNode<()>,
                                    _leaf_ds);
-                        }, T);
+                            },
+                            T
+                        );
                     }
                     debug_assert!(
                         inner_node.consumed as usize <= digits.len(),
@@ -636,14 +661,22 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                     Ok(_leaf) => Partial,
                     Err(inner) => {
                         #[cfg(debug_assertions)]
-                        with_node!(inner.get().unwrap().err().unwrap(), node, {
-                            let min = node.get_min().unwrap();
-                            let mut min_ds = SmallVec::<[u8; 10]>::new();
-                            min_ds.extend(min.key().digits());
-                            if _check {
-                                assert_eq!(&min_ds[0..self.prefix_target-1], &digits[0..self.prefix_target-1]);
-                            }
-                        }, T);
+                        with_node!(
+                            inner.get().unwrap().err().unwrap(),
+                            node,
+                            {
+                                let min = node.get_min().unwrap();
+                                let mut min_ds = SmallVec::<[u8; 10]>::new();
+                                min_ds.extend(min.key().digits());
+                                if _check {
+                                    assert_eq!(
+                                        &min_ds[0..self.prefix_target - 1],
+                                        &digits[0..self.prefix_target - 1]
+                                    );
+                                }
+                            },
+                            T
+                        );
                         delete_raw_recursive(
                             k,
                             inner,
@@ -655,7 +688,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                             &mut self.buckets,
                             false,
                         )
-                    },
+                    }
                 }
             } else if C::COMPLETE && elligible && self.len > 1 {
                 return None;
@@ -675,7 +708,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
                 self.prefix_target,
                 &mut self.buckets,
                 true,
-                );
+            );
         }
         match res {
             Success(x) => {
@@ -1285,7 +1318,8 @@ mod tests {
                     assert!(
                         !s.contains(i),
                         "[{}] Deletion failed immediately for {:?}",
-                        t, DebugVal(i.clone())
+                        t,
+                        DebugVal(i.clone())
                     );
                 }
                 let mut failed = false;

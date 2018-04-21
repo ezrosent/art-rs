@@ -516,57 +516,59 @@ mod node_variants {
 
     // (very) ad-hoc polymorphism!
     macro_rules! n416_delete {
-        ($slf: expr, $d: expr) => {
-            {
-                let _res = match $slf.find_internal($d) {
-                    None => DeleteResult::Failure,
-                    Some((ix, ptr)) => {
-                        let deleted = (*ptr).swap_null();
-                        //  trace!(true, "d={} slf={:?}", $d, $slf);
-                        if ix + 1 < $slf.node.keys[..].len() {
-                            ptr::copy(
-                                &$slf.node.keys[ix + 1],
-                                &mut $slf.node.keys[ix],
-                                $slf.children as usize - ix,
-                            );
-                            ptr::copy(
-                                &$slf.node.ptrs[ix + 1],
-                                &mut $slf.node.ptrs[ix],
-                                $slf.children as usize - ix,
-                            );
-                        }
-                        debug_assert!($slf.children > 0);
-                        $slf.children -= 1;
-                        ptr::write(
-                            &mut $slf.node.ptrs[$slf.children as usize],
-                            ChildPtr::null(),
+        ($slf: expr, $d: expr) => {{
+            let _res = match $slf.find_internal($d) {
+                None => DeleteResult::Failure,
+                Some((ix, ptr)) => {
+                    let deleted = (*ptr).swap_null();
+                    //  trace!(true, "d={} slf={:?}", $d, $slf);
+                    if ix + 1 < $slf.node.keys[..].len() {
+                        ptr::copy(
+                            &$slf.node.keys[ix + 1],
+                            &mut $slf.node.keys[ix],
+                            $slf.children as usize - ix,
                         );
-                        if $slf.children == 1 {
-                            let mut c_ptr = ChildPtr::null();
-                            debug_assert!(
-                                !$slf.node.ptrs[0].is_null(),
-                                "{:?} Uh oh! {:?}",
-                                $slf as *const _,
-                                $slf
-                            );
-                            mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
-
-                            debug_assert!(Some($slf.node.keys[0]) != T::Key::STOP_CHARACTER ||
-                                          c_ptr.get().unwrap().is_ok(), "Singleton is stop {:#?}", $slf);
-                            DeleteResult::Singleton {
-                                deleted: deleted,
-                                last: c_ptr,
-                                last_d: $slf.node.keys[0],
-                            }
-                        } else {
-                            DeleteResult::Success(deleted)
-                        }
+                        ptr::copy(
+                            &$slf.node.ptrs[ix + 1],
+                            &mut $slf.node.ptrs[ix],
+                            $slf.children as usize - ix,
+                        );
                     }
-                };
-                debug_assert!($slf.find_internal($d).is_none());
-                _res
-            }
-        };
+                    debug_assert!($slf.children > 0);
+                    $slf.children -= 1;
+                    ptr::write(
+                        &mut $slf.node.ptrs[$slf.children as usize],
+                        ChildPtr::null(),
+                    );
+                    if $slf.children == 1 {
+                        let mut c_ptr = ChildPtr::null();
+                        debug_assert!(
+                            !$slf.node.ptrs[0].is_null(),
+                            "{:?} Uh oh! {:?}",
+                            $slf as *const _,
+                            $slf
+                        );
+                        mem::swap(&mut $slf.node.ptrs[0], &mut c_ptr);
+
+                        debug_assert!(
+                            Some($slf.node.keys[0]) != T::Key::STOP_CHARACTER
+                                || c_ptr.get().unwrap().is_ok(),
+                            "Singleton is stop {:#?}",
+                            $slf
+                        );
+                        DeleteResult::Singleton {
+                            deleted: deleted,
+                            last: c_ptr,
+                            last_d: $slf.node.keys[0],
+                        }
+                    } else {
+                        DeleteResult::Success(deleted)
+                    }
+                }
+            };
+            debug_assert!($slf.find_internal($d).is_none());
+            _res
+        }};
     }
     impl<T> ::std::fmt::Debug for Node16<T> {
         fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
@@ -1020,8 +1022,12 @@ mod node_variants {
                     if self.children == 1 {
                         // TODO remove the first entry, it isn't required
                         let (ix, or_ptr) = self.get_min_inner().expect("Should be one more child");
-                        debug_assert!(Some(ix) != T::Key::STOP_CHARACTER.map(|x| x as usize) ||
-                                      (*or_ptr).get().unwrap().is_ok(), "Singleton is stop {:#?}", self);
+                        debug_assert!(
+                            Some(ix) != T::Key::STOP_CHARACTER.map(|x| x as usize)
+                                || (*or_ptr).get().unwrap().is_ok(),
+                            "Singleton is stop {:#?}",
+                            self
+                        );
                         self.node.keys[ix] = 0; // not really necessary
                         DeleteResult::Singleton {
                             deleted: deleted,
@@ -1123,7 +1129,12 @@ mod node_variants {
     }
     impl<T> ::std::fmt::Debug for Node48<T> {
         fn fmt(&self, f: &mut ::std::fmt::Formatter) -> Result<(), ::std::fmt::Error> {
-            write!(f, "Node48(keys={:?},ptrs={:?})", &self.keys[..], &self.ptrs[..])
+            write!(
+                f,
+                "Node48(keys={:?},ptrs={:?})",
+                &self.keys[..],
+                &self.ptrs[..]
+            )
         }
     }
 
@@ -1195,10 +1206,13 @@ mod node_variants {
             self.children -= 1;
             if self.children == 1 {
                 for i in 0..256 {
-                    debug_assert!(self.node.ptrs[i].is_null() ||
-                                  Some(i) != T::Key::STOP_CHARACTER.map(|x| x as usize) ||
-                                  self.node.ptrs[i].get().unwrap().is_ok(),
-                                  "Singleton is stop {:#?}", self);
+                    debug_assert!(
+                        self.node.ptrs[i].is_null()
+                            || Some(i) != T::Key::STOP_CHARACTER.map(|x| x as usize)
+                            || self.node.ptrs[i].get().unwrap().is_ok(),
+                        "Singleton is stop {:#?}",
+                        self
+                    );
                     let node = &mut self.node.ptrs[i];
                     if node.is_null() {
                         continue;
