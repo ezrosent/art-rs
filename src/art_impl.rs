@@ -11,6 +11,14 @@ use super::prefix_cache::{HashSetPrefixCache, NullBuckets};
 use super::smallvec::SmallVec;
 pub use super::prefix_cache::PrefixCache;
 
+pub struct ArtPair<K: for<'a> Digital<'a> + PartialOrd, V>(K, V);
+
+impl<K: for<'a> Digital<'a> + PartialOrd, V> ArtPair<K, V> {
+    pub fn new(k: K, v: V) -> ArtPair<K, V> {
+        ArtPair(k, v)
+    }
+}
+
 pub struct ArtElement<T: for<'a> Digital<'a> + PartialOrd>(T);
 
 impl<T: for<'a> Digital<'a> + PartialOrd> ArtElement<T> {
@@ -35,9 +43,93 @@ impl<T: for<'a> Digital<'a> + PartialOrd> Element for ArtElement<T> {
     }
 }
 
+impl<K: for<'a> Digital<'a> + PartialOrd, V> Element for ArtPair<K, V> {
+    type Key = K;
+    fn key(&self) -> &K {
+        &self.0
+    }
+
+    fn matches(&self, k: &Self::Key) -> bool {
+        *k == self.0
+    }
+
+    fn replace_matching(&mut self, other: &mut ArtPair<K, V>) {
+        debug_assert!(self.matches(other.key()));
+        mem::swap(self, other);
+    }
+}
+
 pub type ARTSet<T> = RawART<ArtElement<T>, NullBuckets<ArtElement<T>>>;
 pub type CachingARTSet<T> = RawART<ArtElement<T>, HashSetPrefixCache<ArtElement<T>>>;
+pub type ARTMap<K, V> = RawART<ArtPair<K, V>, NullBuckets<ArtPair<K, V>>>;
+pub type CachingARTMap<K, V> = RawART<ArtPair<K, V>, HashSetPrefixCache<ArtPair<K, V>>>;
 
+impl<K: for<'a> Digital<'a> + PartialOrd, V, C: PrefixCache<ArtPair<K, V>>> RawART<ArtPair<K, V>, C> {
+    pub fn contains<Q>(&self, key: &Q) -> bool
+    where
+        Q: Borrow<K> + ?Sized,
+    {
+        unsafe { self.lookup_raw(key.borrow()).is_some() }
+    }
+
+    pub fn contains_val(&self, key: K) -> bool {
+        self.contains(&key)
+    }
+
+    pub fn add(&mut self, k: K, v: V) -> bool {
+        self.replace(k, v).is_some()
+    }
+
+    pub fn replace(&mut self, k: K, v: V) -> Option<(K, V)> {
+        match unsafe { self.insert_raw(ArtPair::new(k, v)) } {
+            Ok(()) => None,
+            Err(ArtPair(k, v)) => Some((k, v)),
+        }
+    }
+
+    pub fn take<Q>(&mut self, key: &Q) -> Option<(K, V)>
+    where
+        Q: Borrow<K> + ?Sized,
+    {
+        unsafe { self.delete_raw(key.borrow()) }.map(|x| (x.0, x.1))
+    }
+
+    pub fn remove_val(&mut self, key: K) -> bool {
+        self.remove(&key)
+    }
+
+    pub fn remove<Q>(&mut self, key: &Q) -> bool
+    where
+        Q: Borrow<K> + ?Sized,
+    {
+        self.take(key).is_some()
+    }
+
+    pub fn for_each_range<F: FnMut(&K, &V)>(
+        &self,
+        mut f: F,
+        lower_bound: Option<&K>,
+        upper_bound: Option<&K>,
+    ) {
+        let mut lower_digits = SmallVec::<[u8; 16]>::new();
+        let mut upper_digits = SmallVec::<[u8; 16]>::new();
+        let mut ff = |x: &ArtPair<K, V>| f(&x.0, &x.1);
+        visit_leaf(
+            &self.root,
+            &mut ff,
+            lower_bound.map(|x| {
+                lower_digits.extend(x.digits());
+                &lower_digits[..]
+            }),
+            upper_bound.map(|x| {
+                upper_digits.extend(x.digits());
+                &upper_digits[..]
+            }),
+            lower_bound,
+            upper_bound,
+        );
+    }
+}
 impl<T: for<'a> Digital<'a> + PartialOrd, C: PrefixCache<ArtElement<T>>> RawART<ArtElement<T>, C> {
     pub fn contains<Q>(&self, key: &Q) -> bool
     where
@@ -126,7 +218,7 @@ pub struct RawART<T: Element, C: PrefixCache<T>> {
 
 impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub fn new() -> Self {
-        RawART::with_prefix_buckets(6)
+        RawART::with_prefix_buckets(8)
     }
 
     pub fn with_prefix_buckets(prefix_len: usize) -> Self {

@@ -11,6 +11,8 @@ use std::hash::Hash;
 
 use radix_tree::{ARTSet, ArtElement, CachingARTSet, Digital, PrefixCache, RawART};
 
+/// We use a deterministic seed when generating random data to cut down on variance between
+/// different benchmark runs.
 const RAND_SEED: [usize; 32] = [1; 32];
 
 /// Barebones set trait to abstract over various collections.
@@ -21,11 +23,23 @@ trait Set<T> {
     fn delete(&mut self, t: &T) -> bool;
 }
 
-impl<T: for<'a> Digital<'a> + Ord, C: PrefixCache<ArtElement<T>>> Set<T>
+trait ARTArg {
+    const PREFIX_LEN: usize;
+}
+
+impl ARTArg for u64 {
+    const PREFIX_LEN: usize = 3;
+}
+
+impl ARTArg for String {
+    const PREFIX_LEN: usize = 8;
+}
+
+impl<T: ARTArg + for<'a> Digital<'a> + Ord, C: PrefixCache<ArtElement<T>>> Set<T>
     for RawART<ArtElement<T>, C>
 {
     fn new() -> Self {
-        Self::new()
+        Self::with_prefix_buckets(T::PREFIX_LEN)
     }
     fn contains(&self, t: &T) -> bool {
         self.contains(t)
@@ -75,6 +89,13 @@ fn random_vec(len: usize, max_val: u64) -> Vec<u64> {
         .collect()
 }
 
+fn random_dense_vec(len: u64, bias: u64) -> Vec<u64> {
+    let mut rng = StdRng::from_seed(&RAND_SEED[..]);
+    let mut res = (0..len.next_power_of_two()).map(|x| x + bias).collect::<Vec<u64>>();
+    rng.shuffle(res.as_mut_slice());
+    res
+}
+
 fn random_string_vec(max_len: usize, len: usize) -> Vec<String> {
     let mut rng = StdRng::from_seed(&RAND_SEED[..]);
     (0..len.next_power_of_two())
@@ -107,8 +128,6 @@ fn bench_set_insert_remove<T: Clone + for<'a> Digital<'a>, S: Set<T>>(
     contents: &mut S,
     lookups: &Vec<T>,
 ) {
-    // TODO maybe not the best string benchmark? after the first iteration all removes fail and all
-    // inserts succeed. Maybe add an offset that periodically gets incremented?
     assert!(lookups.len().is_power_of_two());
     let mut ix = 0;
     b.iter(|| {
@@ -116,7 +135,10 @@ fn bench_set_insert_remove<T: Clone + for<'a> Digital<'a>, S: Set<T>>(
         ix += 1;
         ix = ix & (lookups.len() - 1);
         contents.delete(&lookups[ix]);
-        ix += 1;
+        // Why += 2? lookups has an even length, but we don't want all inserts to converge to
+        // "replace" ops (similarly, deletes should sometimes succeed).
+        // TODO: There's probably a more principled way of doing this.
+        ix += 2;
         ix = ix & (lookups.len() - 1);
     })
 }
@@ -131,15 +153,24 @@ fn criterion_benchmark(c: &mut Criterion) {
         }
     }
     eprintln!("Generating Ints");
-    let v1s: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 128 << 20]
+    let v1s: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
         .iter()
         .map(|size: &usize| SizeVec(random_vec(*size, !0), random_vec(*size, !0)))
         .collect();
+    let v1_dense: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
+        .iter()
+        .map(|size: &usize| {
+            SizeVec(random_dense_vec(*size as u64, 0),
+                    random_dense_vec(*size as u64, *size as u64 * 2))
+        })
+        .collect();
 
     eprintln!("Generating Strings");
-    let v2s: Vec<SizeVec<String>> = [/* 16 << 10, */ 1 << 20]
+    let v2s: Vec<SizeVec<String>> = [16 << 10, 1 << 20, 16 << 20]
         .iter()
-        .map(|size: &usize| SizeVec(random_string_vec(30, *size), random_string_vec(30, *size)))
+        // NB: random_string_vec will make random UTF8 strings, in practice asking for a string of
+        // length 10 can give you far more than 10 bytes.
+        .map(|size: &usize| SizeVec(random_string_vec(10, *size), random_string_vec(10, *size)))
         .collect();
 
     fn make_bench<T: 'static + Clone + for<'a> Digital<'a>, S: Set<T> + 'static>(
@@ -203,8 +234,9 @@ fn criterion_benchmark(c: &mut Criterion) {
         }
     }
     macro_rules! bench_inner {
-        ($c: expr, $container: tt, $ivec: expr, $svec: expr) => {{
-            make_bench::<u64, $container<u64>>($c, format!("{}/u64", stringify!($container)), $ivec);
+        ($c: expr, $container: tt, $ivec: expr, $ivec2: expr, $svec: expr) => {{
+            make_bench::<u64, $container<u64>>($c, format!("{}/sparse_u64", stringify!($container)), $ivec);
+            make_bench::<u64, $container<u64>>($c, format!("{}/dense_u64", stringify!($container)), $ivec2);
             make_bench::<String, $container<String>>(
                 $c,
                 format!("{}/String", stringify!($container)),
@@ -213,13 +245,13 @@ fn criterion_benchmark(c: &mut Criterion) {
         }};
     }
     macro_rules! bench_all {
-        ($c:expr, $ivec:expr, $svec:expr, $( $container:tt ),+) => {
+        ($c:expr, $ivec:expr, $ivec2:expr, $svec:expr, $( $container:tt ),+) => {
             $(
-                bench_inner!($c, $container, $ivec, $svec);
+                bench_inner!($c, $container, $ivec, $ivec2, $svec);
             )+
         }
     }
-    bench_all!(c, &v1s, &v2s, CachingARTSet, HashSet, BTreeSet, ARTSet);
+    bench_all!(c, &v1s, &v1_dense, &v2s, HashSet, BTreeSet, ARTSet, CachingARTSet);
 }
 
 criterion_group!(benches, criterion_benchmark);
