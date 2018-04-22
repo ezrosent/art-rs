@@ -9,11 +9,13 @@ include benchmarks for random UTF-8 strings.
 
 ### Integers
 
-Here we see that the ART generally does somewhere between the performance of the
-BTree and the hash table. The cache is little help for small tables or dense
-keys. This makes sense, as the sparse keys will often share a prefix, making the
-likely depth of the tree fairly short. Prefix caching *does*, however, make a
-substantial difference for sparse integers in larger tables.
+Here we see that the ART generally does somewhere between the performance of
+the BTree and the hash table. The cache is little help for small tables or
+dense keys. This makes sense, as the dense keys will often share a prefix,
+making the likely depth of the tree fairly short, while prefix compression will
+ensure the absolute depth of the tree is quite low when there are few elements.
+Prefix caching *does*, however, make a substantial difference for sparse
+integers in larger tables.
 
 ![Integer Performance 16K](graphs/dense_u64_sparse_u64_lookup_miss_16384.png?raw=true)
 ![Integer Performance 16M](graphs/dense_u64_sparse_u64_lookup_miss_16777216.png?raw=true)
