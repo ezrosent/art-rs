@@ -5,7 +5,7 @@ Neumann](https://15721.courses.cs.cmu.edu/spring2018/papers/09-oltpindexes2/leis
 This includes an implementation of the ART data-structure described in that
 work, along with experimental support for *prefix-caching*.
 
-# Brief overview of Adaptive Radix Trees
+## Overview
 
 ARTs operate on types that can be decomposed into sequences of bytes. If the
 types are ordered, and these byte sequences (with a lexicographic ordering)
@@ -33,21 +33,21 @@ insertions. The most important of these are:
 See the ART paper for a more complete description of these features.
   
 
-# Prefix-Caching
+## Prefix-Caching
 
-Keys for this data-structure can be decomposed into byte sequences. This repo
-provides variants of the ART that store a hash table mapping from key prefixes
-to *interior nodes* within the tree. This allows traversals for either mutation
-operations or lookups to skip several levels of the tree in their traversal.
-This sort of trick is much harder for ordered tree data-structures, as their
-keys do not necessarily have the needed structure, and they may have more
-complicated rebalancing operations which can make it more difficult to maintain
-the validity of the hash table.
+Keys for this data-structure can be decomposed into byte sequences. Short byte
+sequences can be hashed efficiently. This repo provides variants of the ART
+that store a hash table mapping from key prefixes to *interior nodes* within
+the tree. This allows traversals for either mutation operations or lookups to
+skip several levels of the tree in their traversal.  This sort of trick is much
+harder for ordered tree data-structures, as their keys do not necessarily have
+the needed structure, and they may have more complicated rebalancing operations
+which can make it more difficult to maintain the validity of the hash table.
 
 The length of the cached prefixes can be customized, allowing you to limit the
 maximum size of the cache.
 
-# Performance
+## Performance
 
 We benchmarked lookups (keys within the set and keys not in the set) and
 insert/delete pairs for `ARTSet` (our ART implementation), `CachingARTSet` (an
@@ -57,7 +57,7 @@ and where they are chosen from all possible 64-bit integers ("sparse"). We also
 include benchmarks for random UTF-8 strings.
 
 
-## Integers
+### Integers
 
 Here we see that the ART generally does somewhere between the performance of the
 BTree and the hash table. The cache is little help for small tables or dense
@@ -65,17 +65,36 @@ keys. This makes sense, as the sparse keys will often share a prefix, making the
 likely depth of the tree fairly short. Prefix caching *does*, however, make a
 substantial difference for sparse integers in larger tables.
 
-(TODO link to graphs)
+![Integer Performance 16K](graphs/dense_u64_sparse_u64_lookup_miss_16384.png?raw=true)
+![Integer Performance 16M](graphs/dense_u64_sparse_u64_lookup_miss_16777216.png?raw=true)
+![Integer Performance 256M](graphs/dense_u64_sparse_u64_lookup_miss_268435456.png?raw=true)
 
-## Strings
+![Integer Performance 16K](graphs/dense_u64_sparse_u64_lookup_hit_16384.png?raw=true)
+![Integer Performance 16M](graphs/dense_u64_sparse_u64_lookup_hit_16777216.png?raw=true)
+![Integer Performance 256M](graphs/dense_u64_sparse_u64_lookup_hit_268435456.png?raw=true)
+
+![Integer Performance 16K](graphs/dense_u64_sparse_u64_insert_remove_16384.png?raw=true)
+![Integer Performance 16M](graphs/dense_u64_sparse_u64_insert_remove_16777216.png?raw=true)
+![Integer Performance 256M](graphs/dense_u64_sparse_u64_insert_remove_268435456.png?raw=true)
+
+### Strings
 
 There is a similar story here as to the integer workloads above. The benefit of
 caching here is, however, more pronounced for both lookups and mutations.
 
-(TODO link to graphs)
+![String Performance 16K](graphs/String_lookup_hit_16384.png?raw=true)
+![String Performance 1M](graphs/String_lookup_hit_1048576.png?raw=true)
+![String Performance 16M](graphs/String_lookup_hit_16777216.png?raw=true)
 
+![String Performance 16K](graphs/String_lookup_miss_16384.png?raw=true)
+![String Performance 1M](graphs/String_lookup_miss_1048576.png?raw=true)
+![String Performance 16M](graphs/String_lookup_miss_16777216.png?raw=true)
 
-# TODOs
+![String Performance 16K](graphs/String_insert_remove_16384.png?raw=true)
+![String Performance 1M](graphs/String_insert_remove_1048576.png?raw=true)
+![String Performance 16M](graphs/String_insert_remove_16777216.png?raw=true)
+
+## TODOs
 
 This implementation if very rough. There is still a lot to do to get it to
 feature-parity with other Rust container types.
