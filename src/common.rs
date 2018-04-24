@@ -205,67 +205,13 @@ impl<'a> Digital<'a> for String {
     }
 }
 
-#[derive(PartialOrd, Ord, Hash, PartialEq, Eq, Copy, Clone, Debug)]
-pub struct VNum(u64);
-
-impl VNum {
-    #[inline]
-    pub fn new(u: u64) -> VNum { VNum(u) }
-}
-
-impl ::std::ops::Deref for VNum {
-    type Target = u64;
-    fn deref(&self) -> &u64 {
-        &self.0
-    }
-}
-
-pub struct VNumBytesIterator {
-    cursor: usize,
-    bytes: [u8; 9],
-}
-
-impl Iterator for VNumBytesIterator {
-    type Item = u8;
-    fn next(&mut self) -> Option<u8> {
-        if self.cursor < 9 {
-            self.cursor += 1;
-            Some(self.bytes[self.cursor - 1])
-        } else {
-            None
-        }
-    }
-
-    fn nth(&mut self, n: usize) -> Option<u8> {
-        self.cursor += n;
-        self.next()
-    }
-}
-
-impl<'a> Digital<'a> for VNum {
-    type I = VNumBytesIterator;
-    fn digits(&self) -> VNumBytesIterator {
-        let mut res = VNumBytesIterator {
-            cursor: 0,
-            bytes: [0; 9],
-        };
-        let zs = self.leading_zeros();
-        let shs = (zs / 8) * 8;
-        let bs = (7 + 64 - zs) / 8;
-        res.bytes[0] = bs  as u8;
-        BigEndian::write_u64(&mut res.bytes[1..], self.0.wrapping_shl(shs));
-        res
-    }
-}
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn test_digits_obey_order<D: for<'a> Digital<'a> + PartialOrd>(x: D, y: D) -> bool {
-        let vx: Vec<_> = x.digits().collect(); let vy: Vec<_> = y.digits().collect();
+        let vx: Vec<_> = x.digits().collect();
+        let vy: Vec<_> = y.digits().collect();
         if x < y {
             vx < vy
         } else {
@@ -303,28 +249,5 @@ mod tests {
         fn digits_usize(x: usize, y: usize) -> bool {
             test_digits_obey_order(x.wrapping_shl(20), y.wrapping_shl(20))
         }
-
-        fn digits_vnum(x: u64, y: u64) -> bool {
-            test_digits_obey_order(VNum::new(x.wrapping_shl(20)), VNum::new(y.wrapping_shl(20)))
-        }
-    }
-
-    use std::fmt::{Debug, Formatter, Error};
-    struct DebugVal<V: Debug + for<'a> Digital<'a>>(V);
-    impl<V: Debug + for<'a> Digital<'a>> Debug for DebugVal<V> {
-        fn fmt(&self, f: &mut Formatter) -> Result<(), Error> {
-            write!(f, "{:?}", self.0.digits().collect::<Vec<_>>())
-        }
-    }
-
-    #[test]
-    fn print_vnum() {
-        fn compare_vals(u: u64) {
-            eprintln!("num:{:10} (binary={:#064b})\nreg: {:?}\nvnum: {:?}\n", u, u, DebugVal(u), DebugVal(VNum::new(u)))
-        }
-        compare_vals(0);
-        compare_vals(1 << 10);
-        compare_vals((256 << 20) - 1);
-        compare_vals(55912638);
     }
 }

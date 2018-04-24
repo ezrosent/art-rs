@@ -9,7 +9,7 @@ use std::collections::btree_set::BTreeSet;
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use radix_tree::{ARTSet, ArtElement, CachingARTSet, Digital, PrefixCache, RawART, VNum};
+use radix_tree::{ARTSet, ArtElement, CachingARTSet, Digital, PrefixCache, RawART};
 
 /// We use a deterministic seed when generating random data to cut down on variance between
 /// different benchmark runs.
@@ -25,10 +25,6 @@ trait Set<T> {
 
 trait ARTArg {
     const PREFIX_LEN: usize;
-}
-
-impl ARTArg for VNum {
-    const PREFIX_LEN: usize = 3;
 }
 
 impl ARTArg for u64 {
@@ -95,7 +91,9 @@ fn random_vec(len: usize, max_val: u64) -> Vec<u64> {
 
 fn random_dense_vec(len: u64, bias: u64) -> Vec<u64> {
     let mut rng = StdRng::from_seed(&RAND_SEED[..]);
-    let mut res = (0..len.next_power_of_two()).map(|x| x + bias).collect::<Vec<u64>>();
+    let mut res = (0..len.next_power_of_two())
+        .map(|x| x + bias)
+        .collect::<Vec<u64>>();
     rng.shuffle(res.as_mut_slice());
     res
 }
@@ -234,17 +232,6 @@ fn criterion_benchmark(c: &mut Criterion) {
             )+
         }
     }
-    
-    // {
-    //     let v1_sparse: Vec<SizeVec<VNum>> = [16 << 10, 16 << 20, 256 << 20]
-    //         .iter()
-    //         .map(|size: &usize| {
-    //             SizeVec(random_vec(*size, !0).iter().map(|x| VNum::new(*x)).collect(),
-    //                     random_vec(*size, !0).iter().map(|x| VNum::new(*x)).collect())
-    //         })
-    //         .collect();
-    //     make_bench::<VNum, ARTSet<VNum>>(c, String::from("ARTSet/sparse_vnum"), &v1_sparse)
-    // }
     eprintln!("Generating Ints");
     let v1s: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
         .iter()
@@ -253,8 +240,10 @@ fn criterion_benchmark(c: &mut Criterion) {
     let v1_dense: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
         .iter()
         .map(|size: &usize| {
-            SizeVec(random_dense_vec(*size as u64, 0),
-                    random_dense_vec(*size as u64, *size as u64 * 2))
+            SizeVec(
+                random_dense_vec(*size as u64, 0),
+                random_dense_vec(*size as u64, *size as u64 * 2),
+            )
         })
         .collect();
     eprintln!("Generating Strings");
@@ -265,8 +254,16 @@ fn criterion_benchmark(c: &mut Criterion) {
         .map(|size: &usize| SizeVec(random_string_vec(10, *size), random_string_vec(10, *size)))
         .collect();
 
-
-    bench_all!(c, &v1s, &v1_dense, &v2s, ARTSet, HashSet, BTreeSet, CachingARTSet);
+    bench_all!(
+        c,
+        &v1s,
+        &v1_dense,
+        &v2s,
+        ARTSet,
+        HashSet,
+        BTreeSet,
+        CachingARTSet
+    );
 }
 
 criterion_group!(benches, criterion_benchmark);

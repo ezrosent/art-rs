@@ -64,7 +64,9 @@ pub type CachingARTSet<T> = RawART<ArtElement<T>, HashSetPrefixCache<ArtElement<
 pub type ARTMap<K, V> = RawART<ArtPair<K, V>, NullBuckets<ArtPair<K, V>>>;
 pub type CachingARTMap<K, V> = RawART<ArtPair<K, V>, HashSetPrefixCache<ArtPair<K, V>>>;
 
-impl<K: for<'a> Digital<'a> + PartialOrd, V, C: PrefixCache<ArtPair<K, V>>> RawART<ArtPair<K, V>, C> {
+impl<K: for<'a> Digital<'a> + PartialOrd, V, C: PrefixCache<ArtPair<K, V>>>
+    RawART<ArtPair<K, V>, C>
+{
     pub fn contains<Q>(&self, key: &Q) -> bool
     where
         Q: Borrow<K> + ?Sized,
