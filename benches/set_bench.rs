@@ -9,7 +9,7 @@ use std::collections::btree_set::BTreeSet;
 use std::collections::HashSet;
 use std::hash::Hash;
 
-use radix_tree::{ARTSet, ArtElement, CachingARTSet, Digital, PrefixCache, RawART};
+use radix_tree::{ARTSet, ArtElement, CachingARTSet, Digital, PrefixCache, RawART, VNum};
 
 /// We use a deterministic seed when generating random data to cut down on variance between
 /// different benchmark runs.
@@ -25,6 +25,10 @@ trait Set<T> {
 
 trait ARTArg {
     const PREFIX_LEN: usize;
+}
+
+impl ARTArg for VNum {
+    const PREFIX_LEN: usize = 3;
 }
 
 impl ARTArg for u64 {
@@ -152,27 +156,6 @@ fn criterion_benchmark(c: &mut Criterion) {
             write!(f, "{:?}", self.0.len())
         }
     }
-    eprintln!("Generating Ints");
-    let v1s: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
-        .iter()
-        .map(|size: &usize| SizeVec(random_vec(*size, !0), random_vec(*size, !0)))
-        .collect();
-    let v1_dense: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
-        .iter()
-        .map(|size: &usize| {
-            SizeVec(random_dense_vec(*size as u64, 0),
-                    random_dense_vec(*size as u64, *size as u64 * 2))
-        })
-        .collect();
-
-    eprintln!("Generating Strings");
-    let v2s: Vec<SizeVec<String>> = [16 << 10, 1 << 20, 16 << 20]
-        .iter()
-        // NB: random_string_vec will make random UTF8 strings, in practice asking for a string of
-        // length 10 can give you far more than 10 bytes.
-        .map(|size: &usize| SizeVec(random_string_vec(10, *size), random_string_vec(10, *size)))
-        .collect();
-
     fn make_bench<T: 'static + Clone + for<'a> Digital<'a>, S: Set<T> + 'static>(
         c: &mut Criterion,
         desc: String,
@@ -251,7 +234,39 @@ fn criterion_benchmark(c: &mut Criterion) {
             )+
         }
     }
-    bench_all!(c, &v1s, &v1_dense, &v2s, HashSet, BTreeSet, ARTSet, CachingARTSet);
+    
+    // {
+    //     let v1_sparse: Vec<SizeVec<VNum>> = [16 << 10, 16 << 20, 256 << 20]
+    //         .iter()
+    //         .map(|size: &usize| {
+    //             SizeVec(random_vec(*size, !0).iter().map(|x| VNum::new(*x)).collect(),
+    //                     random_vec(*size, !0).iter().map(|x| VNum::new(*x)).collect())
+    //         })
+    //         .collect();
+    //     make_bench::<VNum, ARTSet<VNum>>(c, String::from("ARTSet/sparse_vnum"), &v1_sparse)
+    // }
+    eprintln!("Generating Ints");
+    let v1s: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
+        .iter()
+        .map(|size: &usize| SizeVec(random_vec(*size, !0), random_vec(*size, !0)))
+        .collect();
+    let v1_dense: Vec<SizeVec<u64>> = [16 << 10, 16 << 20, 256 << 20]
+        .iter()
+        .map(|size: &usize| {
+            SizeVec(random_dense_vec(*size as u64, 0),
+                    random_dense_vec(*size as u64, *size as u64 * 2))
+        })
+        .collect();
+    eprintln!("Generating Strings");
+    let v2s: Vec<SizeVec<String>> = [16 << 10, 1 << 20, 16 << 20]
+        .iter()
+        // NB: random_string_vec will make random UTF8 strings, in practice asking for a string of
+        // length 10 can give you far more than 10 bytes.
+        .map(|size: &usize| SizeVec(random_string_vec(10, *size), random_string_vec(10, *size)))
+        .collect();
+
+
+    bench_all!(c, &v1s, &v1_dense, &v2s, ARTSet, HashSet, BTreeSet, CachingARTSet);
 }
 
 criterion_group!(benches, criterion_benchmark);

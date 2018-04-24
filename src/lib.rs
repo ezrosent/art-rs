@@ -11,7 +11,7 @@ mod prefix_cache;
 extern crate byteorder;
 extern crate smallvec;
 
-pub use common::Digital;
+pub use common::{Digital, VNum};
 pub use art_impl::*;
 #[cfg(test)]
 #[macro_use]
