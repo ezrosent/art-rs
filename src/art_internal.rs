@@ -289,6 +289,23 @@ pub enum DeleteResult<T> {
     },
 }
 
+pub trait Direction: Copy {
+    const LEFT_TO_RIGHT: bool;
+}
+
+#[derive(Copy, Clone)]
+pub struct Increasing;
+#[derive(Copy, Clone)]
+pub struct Decreasing;
+
+impl Direction for Increasing {
+    const LEFT_TO_RIGHT: bool = true;
+}
+
+impl Direction for Decreasing {
+    const LEFT_TO_RIGHT: bool = false;
+}
+
 pub trait Node<T: Element>: Sized {
     // insert assumes that 'd' is not present in the node. This is enforced in debug buids
     unsafe fn insert(
@@ -315,13 +332,14 @@ pub trait Node<T: Element>: Sized {
     // iterate over all non-null direct children of the node.
     fn local_foreach<F: FnMut(u8, MarkedPtr<T>)>(&self, f: F);
 
-    fn for_each<F: FnMut(&T)>(
+    fn for_each<F: FnMut(&T), D: Direction>(
         &self,
         f: &mut F,
         lower: Option<&[u8]>,
         upper: Option<&[u8]>,
         lval: Option<&T::Key>,
         rval: Option<&T::Key>,
+        _dir: D,
     );
 }
 
@@ -385,16 +403,18 @@ impl<T> ::std::fmt::Debug for Node4<T> {
     }
 }
 
-pub fn visit_leaf<T, F>(
+pub fn visit_leaf<T, F, D>(
     c: &ChildPtr<T>,
     f: &mut F,
     mut lower: Option<&[u8]>,
     mut upper: Option<&[u8]>,
     lval: Option<&T::Key>,
     rval: Option<&T::Key>,
+    _dir: D,
 ) where
     F: FnMut(&T),
     T: Element,
+    D: Direction,
 {
     fn advance_by(s: &mut Option<&[u8]>, by: usize) {
         if s.is_none() {
@@ -485,7 +505,9 @@ pub fn visit_leaf<T, F>(
             }
             advance_by(&mut lower, inner.count as usize);
             advance_by(&mut upper, inner.count as usize);
-            with_node!(inner, node, { node.for_each(f, lower, upper, lval, rval) })
+            with_node!(inner, node, {
+                node.for_each(f, lower, upper, lval, rval, _dir)
+            })
         }
     }
 }
@@ -587,24 +609,49 @@ mod node_variants {
         res
     }
 
+    macro_rules! do_foreach_dir {
+        ($ltr:expr, $rng:expr, $lvar:ident, $body:expr) => {
+            if $ltr {
+                for $lvar in $rng {
+                    $body
+                }
+            } else {
+                for $lvar in ($rng).rev() {
+                    $body
+                }
+            }
+        };
+    }
+
     macro_rules! n416_foreach {
-        ($slf: expr, $f: expr, $lower: expr, $upper: expr, $lval: expr, $uval: expr) => {{
+        ($slf: expr, $f: expr, $lower: expr,
+         $upper: expr, $lval: expr, $uval: expr,
+         $dir:expr, $ltr:expr) => {{
             debug_assert!(is_sorted(&$slf.node.keys[..$slf.children as usize]));
             let low = advance_or(&mut $lower, 0);
             let high = advance_or(&mut $upper, 255);
             let children = $slf.children as usize;
-            for i in 0..children {
+            do_foreach_dir!($ltr, 0..children, i, {
                 let k = $slf.node.keys[i] as usize;
-                if k < low {
-                    continue;
-                }
-                if k > high {
-                    break;
+                if $ltr {
+                    if k < low {
+                        continue;
+                    }
+                    if k > high {
+                        break;
+                    }
+                } else {
+                    if k > high {
+                        continue;
+                    }
+                    if k < low {
+                        break;
+                    }
                 }
                 let low = if k == low { $lower } else { None };
                 let high = if k == high { $upper } else { None };
-                visit_leaf(&$slf.node.ptrs[i], $f, low, high, $lval, $uval)
-            }
+                visit_leaf(&$slf.node.ptrs[i], $f, low, high, $lval, $uval, $dir)
+            })
         }};
     }
 
@@ -741,15 +788,16 @@ mod node_variants {
             unreachable!()
         }
 
-        fn for_each<F: FnMut(&T)>(
+        fn for_each<F: FnMut(&T), D: Direction>(
             &self,
             f: &mut F,
             mut lower: Option<&[u8]>,
             mut upper: Option<&[u8]>,
             lval: Option<&T::Key>,
             rval: Option<&T::Key>,
+            _dir: D,
         ) {
-            n416_foreach!(self, f, lower, upper, lval, rval)
+            n416_foreach!(self, f, lower, upper, lval, rval, _dir, D::LEFT_TO_RIGHT)
         }
     }
 
@@ -895,15 +943,16 @@ mod node_variants {
             return Ok(());
         }
 
-        fn for_each<F: FnMut(&T)>(
+        fn for_each<F: FnMut(&T), D: Direction>(
             &self,
             f: &mut F,
             mut lower: Option<&[u8]>,
             mut upper: Option<&[u8]>,
             lval: Option<&T::Key>,
             rval: Option<&T::Key>,
+            _dir: D,
         ) {
-            n416_foreach!(self, f, lower, upper, lval, rval)
+            n416_foreach!(self, f, lower, upper, lval, rval, _dir, D::LEFT_TO_RIGHT)
         }
     }
 
@@ -1096,18 +1145,18 @@ mod node_variants {
             unreachable!()
         }
 
-        fn for_each<F: FnMut(&T)>(
+        fn for_each<F: FnMut(&T), D: Direction>(
             &self,
             f: &mut F,
             mut lower: Option<&[u8]>,
             mut upper: Option<&[u8]>,
             lval: Option<&T::Key>,
             rval: Option<&T::Key>,
+            _dir: D,
         ) {
             let low = advance_or(&mut lower, 0);
             let high = advance_or(&mut upper, 255);
-
-            for i in low..(high + 1) {
+            do_foreach_dir!(D::LEFT_TO_RIGHT, low..(high + 1), i, {
                 let ix = self.node.keys[i];
                 if ix == 0 {
                     continue;
@@ -1119,8 +1168,9 @@ mod node_variants {
                     if i == high { upper } else { None },
                     lval,
                     rval,
+                    _dir,
                 );
-            }
+            })
         }
     }
 
@@ -1244,17 +1294,21 @@ mod node_variants {
             Ok(())
         }
 
-        fn for_each<F: FnMut(&T)>(
+        fn for_each<F: FnMut(&T), D: Direction>(
             &self,
             f: &mut F,
             mut lower: Option<&[u8]>,
             mut upper: Option<&[u8]>,
             lval: Option<&T::Key>,
             rval: Option<&T::Key>,
+            _dir: D,
         ) {
             let low = advance_or(&mut lower, 0);
             let high = advance_or(&mut upper, 255);
-            for i in low..(high + 1) {
+            do_foreach_dir!(
+                D::LEFT_TO_RIGHT,
+                low..(high + 1),
+                i,
                 visit_leaf(
                     &self.node.ptrs[i],
                     f,
@@ -1262,8 +1316,9 @@ mod node_variants {
                     if i == high { upper } else { None },
                     lval,
                     rval,
-                );
-            }
+                    _dir,
+                )
+            );
         }
     }
 }

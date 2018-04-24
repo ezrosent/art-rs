@@ -189,6 +189,8 @@ mod dense_hash_set {
 
     /// A bare-bones implementation of Google's dense_hash_set. Not a full-featured map, but
     /// contains sufficient functionality to be used as a PrefixCache
+    ///
+    /// TODO: explore optimizing this more (for time or for space).
     struct DenseHashTable<T> {
         buckets: Vec<T>,
         len: usize,

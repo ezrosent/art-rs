@@ -109,9 +109,28 @@ impl<K: for<'a> Digital<'a> + PartialOrd, V, C: PrefixCache<ArtPair<K, V>>>
 
     pub fn for_each_range<F: FnMut(&K, &V)>(
         &self,
+        f: F,
+        lower_bound: Option<&K>,
+        upper_bound: Option<&K>,
+    ) {
+        self.for_each_range_dir(f, lower_bound, upper_bound, Increasing);
+    }
+
+    pub fn for_each_range_rev<F: FnMut(&K, &V)>(
+        &self,
+        f: F,
+        lower_bound: Option<&K>,
+        upper_bound: Option<&K>,
+    ) {
+        self.for_each_range_dir(f, lower_bound, upper_bound, Decreasing);
+    }
+
+    fn for_each_range_dir<F: FnMut(&K, &V), D: Direction>(
+        &self,
         mut f: F,
         lower_bound: Option<&K>,
         upper_bound: Option<&K>,
+        _dir: D,
     ) {
         let mut lower_digits = SmallVec::<[u8; 16]>::new();
         let mut upper_digits = SmallVec::<[u8; 16]>::new();
@@ -129,6 +148,7 @@ impl<K: for<'a> Digital<'a> + PartialOrd, V, C: PrefixCache<ArtPair<K, V>>>
             }),
             lower_bound,
             upper_bound,
+            _dir,
         );
     }
 }
@@ -175,9 +195,28 @@ impl<T: for<'a> Digital<'a> + PartialOrd, C: PrefixCache<ArtElement<T>>> RawART<
 
     pub fn for_each_range<F: FnMut(&T)>(
         &self,
+        f: F,
+        lower_bound: Option<&T>,
+        upper_bound: Option<&T>,
+    ) {
+        self.for_each_range_dir(f, lower_bound, upper_bound, Increasing);
+    }
+
+    pub fn for_each_range_rev<F: FnMut(&T)>(
+        &self,
+        f: F,
+        lower_bound: Option<&T>,
+        upper_bound: Option<&T>,
+    ) {
+        self.for_each_range_dir(f, lower_bound, upper_bound, Decreasing);
+    }
+
+    fn for_each_range_dir<F: FnMut(&T), D: Direction>(
+        &self,
         mut f: F,
         lower_bound: Option<&T>,
         upper_bound: Option<&T>,
+        _dir: D,
     ) {
         let mut lower_digits = SmallVec::<[u8; 16]>::new();
         let mut upper_digits = SmallVec::<[u8; 16]>::new();
@@ -195,6 +234,7 @@ impl<T: for<'a> Digital<'a> + PartialOrd, C: PrefixCache<ArtElement<T>>> RawART<
             }),
             lower_bound,
             upper_bound,
+            _dir,
         );
     }
 }
@@ -258,7 +298,7 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         }
     }
 
-    // replace with NonNull
+    // TODO: replace with NonNull
     pub unsafe fn lookup_raw(&self, k: &T::Key) -> Option<*mut T> {
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
@@ -363,6 +403,9 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
     pub unsafe fn delete_raw(&mut self, k: &T::Key) -> Option<T> {
         // Also, consider hypothesis that promoting last doesn't work, and is leading to failed
         // lookups
+        //
+        // TODO: This method (particularly delete_raw_recursive) is way too long; should break it
+        // out into more helpers.
         let mut digits = SmallVec::<[u8; 32]>::new();
         digits.extend(k.digits());
         use self::PartialDeleteResult::*;
@@ -1493,5 +1536,9 @@ mod tests {
         elts.clear();
         s.for_each_range(|x| elts.push(*x), None, Some(&v1[q3]));
         assert_lists_equal(&v1[..q3], &elts[..]);
+        elts.clear();
+        s.for_each_range_rev(|x| elts.push(*x), Some(&v1[q1]), Some(&v1[q3]));
+        let vs = (&v1[q1..q3]).iter().rev().map(|x| *x).collect::<Vec<_>>();
+        assert_lists_equal(&vs[..], &elts[..]);
     }
 }
