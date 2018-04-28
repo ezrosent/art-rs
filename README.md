@@ -57,8 +57,9 @@ caching can improve performance even further when the set is large. See
 
 ## TODOs
 
-This implementation if very rough. There is still a lot to do to get it to
-feature-parity with other Rust container types.
+This implementation if very rough, and likely contains bugs. On top of general
+code improvements, there is also still a lot to do to get it to feature-parity
+with the standard Rust container types.
 
 ### API Parity with `BTreeSet`
 This includes good implementations of set operations, as well as a proper
@@ -71,9 +72,9 @@ values, which is not yet implemented in this code-base.
 
 ### Multithreading
 While [follow-up work](https://db.in.tum.de/~leis/papers/artsync.pdf)
-implemented synchronization for the ART, this repo only includes a single-threaded
-implementation, though I am interested in implementing a multithreaded version
-at some point in the future.
+implemented synchronization for the ART, this repo only includes a
+single-threaded implementation. I am interested in implementing a multithreaded
+version at some point in the future.
 
 ### Slab Allocation
 We currently do heap allocations for all new interior nodes and leaf nodes. At
