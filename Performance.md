@@ -34,16 +34,6 @@ integers in larger tables.
 There is a similar story here as to the integer workloads above. The benefit of
 caching here is, however, more pronounced for both lookups and mutations.
 
-![String Performance 16K](graphs/String_lookup_hit_16384.png?raw=true)
-![String Performance 1M](graphs/String_lookup_hit_1048576.png?raw=true)
-![String Performance 16M](graphs/String_lookup_hit_16777216.png?raw=true)
-
-![String Performance 16K](graphs/String_lookup_miss_16384.png?raw=true)
-![String Performance 1M](graphs/String_lookup_miss_1048576.png?raw=true)
-![String Performance 16M](graphs/String_lookup_miss_16777216.png?raw=true)
-
-![String Performance 16K](graphs/String_insert_remove_16384.png?raw=true)
-![String Performance 1M](graphs/String_insert_remove_1048576.png?raw=true)
-![String Performance 16M](graphs/String_insert_remove_16777216.png?raw=true)
-
-
+![String Hits](graphs/String_lookup_hit.png?raw=true)
+![String Misses](graphs/String_lookup_miss.png?raw=true)
+![String Mutates](graphs/String_insert_remove.png?raw=true)

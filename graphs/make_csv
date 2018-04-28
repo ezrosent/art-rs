@@ -1,14 +1,28 @@
 #!/bin/bash
 
+# First run `cargo bench` (beware: this takes a long time and it uses a lot of memory).
+# Then run this script from the crate root and redirect output to graphs/results.csv.
+# Then run Rscript make_graphs.r to regenerate graphs.
+
 CATEGORIES="dense_u64 sparse_u64 String"
 DATA_STRUCTURES="ARTSet CachingARTSet HashSet BTreeSet"
 BENCHES="lookup_hit lookup_miss insert_remove"
 
-echo "data structure,data type,workload,number of elements,mean time per operation ns"
+echo "data structure,data type,workload,number of elements,str number of elements,mean time per operation ns"
 for c in $CATEGORIES; do
 	for d in $DATA_STRUCTURES; do
 		for b in $BENCHES; do
 			for sz in $(ls "target/criterion/${d}/${c}/${b}" | grep -Ev 'report|new|base|change'); do
+				st_elts=$(echo "$sz" | gawk '{
+				r20=rshift($1, 20)
+				r10=rshift($1, 10)
+				if (r20 > 0) {
+					print r20"M"
+				} else if (r10 > 0) {
+					print r10"K"
+				} else if ($1 > 0) {
+					print $1
+				}}')
 				avg_perf=$(cat "target/criterion/${d}/${c}/${b}/${sz}/report/index.html" |
 					grep '<td>Mean</td>' -A3 |
 					tail -n2 |
@@ -16,7 +30,7 @@ for c in $CATEGORIES; do
 					cut -d'>' -f2 |
 					cut -d'<' -f1 | 
 					awk '{ if ($2 == "ns") { print $1 } if ($2 == "us") { print 1000 * $1 } }')
-				echo "$d,$c,$b,$sz,$avg_perf"
+				echo "$d,$c,$b,$sz,$st_elts,$avg_perf"
 			done
 		done
 	done

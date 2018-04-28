@@ -79,6 +79,12 @@ at some point in the future.
 We currently do heap allocations for all new interior nodes and leaf nodes. At
 the very least interior nodes could probably benefit from slab allocation.
 
+### Space-optimized Prefix Caching
+Because real-world map workloads are often skewed towards a small subset of the
+keys, it should be possible tune the prefix cache to store a small subset of
+keys. This would reduce the space overhead of the cache while still hopefully
+preserving most of the performance gains.
+
 
 [1]: See section 4 of the paper for more information on this. In this code, it
 is encapsulated by the `Digital` trait, which has implementation for common
