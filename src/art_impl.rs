@@ -263,6 +263,8 @@ impl<T: Element, C: PrefixCache<T>> RawART<T, C> {
         RawART::with_prefix_buckets(8)
     }
 
+    /// Construct a new ART that caches interior nodes corresponding to prefixes of length
+    /// `prefix_len`. The prefix length must be positive, and it cannot exceed 8.
     pub fn with_prefix_buckets(prefix_len: usize) -> Self {
         assert!(prefix_len <= 8);
         assert!(prefix_len > 0);

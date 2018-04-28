@@ -13,8 +13,13 @@ use std::arch::x86_64::_mm_movemask_epi8;
 use super::smallvec::{Array, SmallVec};
 
 pub const PREFIX_LEN: usize = 8;
+/// used by the `with_node_mut` macro
 pub type RawMutRef<'a, T> = &'a mut RawNode<T>;
+
+/// used by the `with_node` macro
 pub type RawRef<'a, T> = &'a RawNode<T>;
+
+/// a non-owning reference to a `ChildPtr<T>`
 pub struct MarkedPtr<T>(usize, PhantomData<T>);
 pub use self::node_variants::{NODE_16, NODE_256, NODE_4, NODE_48, Node16, Node256, Node48,
                               NodeType};
